@@ -165,3 +165,10 @@ test('generic unknown component paths stay blank while ordinary model names are 
     assert.equal(parseSFT(prefix + JSON.stringify(c)).configuration.fields['模型'], expected);
   }
 });
+
+test('successful tqdm progress without explicit metrics keeps performance blank and explains why', () => {
+  const p = parseSFT(log + '\nEpoch 1/1: 3%| | 304/8800 [24:20<10:37:03, 4.50s/it, total_loss: 0.46, mse_video: 0.08, mse_audio: 0.38]\nEpoch 1/1: 3%| | 305/8800 [24:24<10:23:42, 4.41s/it, total_loss: 0.40, mse_video: 0.08, mse_audio: 0.32]');
+  assert.equal(p.count, 0);
+  for (const m of Object.values(p.metrics)) assert.equal(m.mean, null);
+  assert.match(p.configuration.notes.join('\n'), /平滑.*不作为逐步实测耗时/);
+});

@@ -8,7 +8,7 @@ const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
 // Keep error feedback visible from both the wizard and the history view.
 $('.topbar').after($('#alert'));
-const schema = await fetch('./columns.json').then(response => {
+const schema = await fetch(new URL('./columns.json', import.meta.url)).then(response => {
   if (!response.ok) throw new Error('表头配置无法加载');
   return response.json();
 });

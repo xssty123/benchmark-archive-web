@@ -82,7 +82,7 @@ function parseVeOmniSFT(text) {
   for (const record of parsed.records) addStep(rows, record.step, record.values, record.line);
   configuration.notes.push(...parsed.notes,
     'VeOmni 吞吐使用 tokens_per_second(M) × 1,000,000，单位为全局 tokens/s；MFU 原始值为比例，页面显示百分比',
-    '仅采用带明确步号的指标字典；进度条 s/it、it/s 和累计 token 数不作为逐步性能。单步耗时仅采用明确记录的 step_time_s');
+    '仅采用带明确步号的指标字典；进度条 s/it、it/s 是速率估计，默认经过平滑，不作为逐步实测耗时，也不由此推算 TPS 或 MFU。单步耗时仅采用明确记录的 step_time_s');
   const metadata = { unit: 'tokens/s', adapter: 'veomni-text-v1', configuration };
   if (rows.size) return withRecords(rows, SFT_FIELDS, /Returning zero FLOPs|MFU will always be zero/i.test(text), metadata);
   const reason = '日志未记录可用的逐步性能数据';

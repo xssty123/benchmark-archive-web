@@ -1,7 +1,7 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Benchmark Archive · 训练性能归档</title><link rel="stylesheet" href="./style.css"></head>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="app-version" content="development"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Benchmark Archive · 训练性能归档</title><link rel="stylesheet" href="./style.css"></head>
 <body>
-<aside class="sidebar"><a class="brand" href="./"><span class="brandmark">B</span><span>Benchmark<span class="brand-sub">ARCHIVE</span></span></a><div class="nav-label">工作空间</div><button class="nav active" id="nav-new"><span>＋</span> 解析新日志</button><button class="nav" id="nav-records"><span>▤</span> 历史记录 <b id="nav-count">0</b></button><div class="sidebar-bottom"><span class="status-dot"></span> 浏览器本地解析<div>RL / SFT · v0.1</div></div></aside>
+<aside class="sidebar"><a class="brand" href="./"><span class="brandmark">B</span><span>Benchmark<span class="brand-sub">ARCHIVE</span></span></a><div class="nav-label">工作空间</div><button class="nav active" id="nav-new"><span>＋</span> 解析新日志</button><button class="nav" id="nav-records"><span>▤</span> 历史记录 <b id="nav-count">0</b></button><div class="sidebar-bottom"><span class="status-dot"></span> 浏览器本地解析<div>RL / SFT · <span id="build-version">加载版本…</span></div></div></aside>
 <main><header class="topbar"><div>训练基础设施 <span>/</span> 性能归档</div></header>
 <section id="new-view"><div class="pageheading"><div><div class="eyebrow">NEW BENCHMARK</div><h1>训练性能记录</h1><p>解析运行日志，整理 RL / SFT 性能数据</p></div><button class="button secondary" id="demo">试用演示数据 <span>↗</span></button></div>
 <button class="button secondary back-material hidden" id="back-upload">← 返回日志选择</button>
@@ -33,4 +33,4 @@
 <section id="records-view" class="hidden"><div class="pageheading"><div><div class="eyebrow">RUN HISTORY</div><h1>历史记录</h1><p>保存核对后的结果、原始日志和材料链接，可编辑、复制、导出或删除</p></div><div class="review-actions"><button id="resume-review" class="button secondary" hidden>返回当前核对</button></div></div><div class="record-toolbar"><div class="segmented"><button data-filter="RL" class="selected">RL</button><button data-filter="SFT">SFT</button></div><span class="muted">本地浏览器记录，未同步至云端</span></div><p id="history-copy-status" role="status" class="footnote"></p><textarea id="history-copy-fallback" class="hidden" readonly aria-label="手动复制历史记录内容"></textarea><div id="history" class="panel history"></div><p class="footnote">清除浏览器站点数据会移除本地记录，重要材料请下载备份</p></section>
 <footer>Benchmark Archive <span>为训练性能记录提供可追溯的上下文</span></footer></main>
 <dialog id="discard-dialog" aria-labelledby="discard-title"><h2 id="discard-title">当前内容尚未保存</h2><p>继续会放弃当前日志、核对结果和材料链接，已保存的历史记录不受影响</p><form method="dialog" class="review-actions"><button class="button secondary" value="keep" autofocus>保留当前内容</button><button class="button primary" value="discard">放弃并继续</button></form></dialog>
-<script type="module" src="./app.js"></script></body></html>
+<script type="module" src="./boot.js"></script></body></html>
