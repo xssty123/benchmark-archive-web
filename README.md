@@ -100,6 +100,14 @@ step:2 - perf/throughput:120 - perf/time_per_step:160 - timing_s/update_actor:55
 - Qwen3-Omni-30B-A3B-Instruct 的 Thinker + FSDP/FSDP2 + `enable_gradient_checkpointing=true` 按标准实现归为全重计算，范围是 Thinker 文本主干全部 Transformer 层（含 Attention、MoE），不表示整个多模态系统所有算子都重算。依据：[DecoderLayer 及逐层调用](https://github.com/huggingface/transformers/blob/v4.57.1/src/transformers/models/qwen3_omni_moe/modeling_qwen3_omni_moe.py#L1351-L1561)、[完整层 checkpoint 包装](https://github.com/huggingface/transformers/blob/v4.57.1/src/transformers/modeling_layers.py#L33-L85)、[递归开启 checkpoint](https://github.com/huggingface/transformers/blob/v4.57.1/src/transformers/modeling_utils.py#L3413-L3424)。此版本用于核对标准实现，不代表已确认历史运行使用该版本；精确版本或自定义补丁需环境快照核验，分类依据保留在解析说明
 - 历史记录中的旧重计算名称在表格和 CSV 导出时统一显示，原始存档不改写；只有记录包含 Thinker 阶段及匹配的模型、后端信息时，才会将旧「开启梯度检查点」归为全重计算
 
+### RL：slime 原始日志
+
+选择 RL 后自动识别 slime 的 `perf <rollout_id>: {...}`，同一编号的训练和 rollout 指标合并，默认全部步数，也可调整范围。配置支持 Megatron 参数表、Namespace 和顶层参数字典，每个字段独立识别；只有配置而没有性能时也能核对、复制和保存
+
+TPS 使用已打印的 `perf/actor_train_tok_per_s`（训练阶段全局 tokens/s），不混用生成阶段吞吐。训练、rollout、权重更新及单步耗时按各自明确字段填写；MFU 缺失留空，不从 TFLOPS 推算。来源及跨框架口径差异放在解析说明，备注只保留用户输入
+
+当前按本地 slime 源码和合成日志验证，尚无实际 slime 训练日志回归。字段映射、计时范围与版本边界见 [slime 解析说明](docs/slime-parser.md)
+
 ### SFT：VeOmni 原始日志
 
 可以直接选择 VeOmni 的 `.log` / `.txt`，不需要先转换成 JSONL。支持启动时打印的 `model / data / train` 配置、运行时设备规模和梯度累积记录，以及 HF `Model config` 中的文本主干层数和专家数、DiT 主干的 `num_layers`（不混用条件模型层数）。字段按完整路径独立提取，异常或重复字段只影响对应结果，提示包含字段路径和原日志行号

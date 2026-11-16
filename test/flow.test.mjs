@@ -225,9 +225,12 @@ test('draft dialog only permits leaving after explicit discard', async () => {
   assert.equal(await discard, true);
 });
 
-test('config-only VeOmni results can be reviewed, copied and saved without a step range', async () => {
-  const f = fixture(); f.state.task = 'SFT';
-  await f.choose(file('VeOmni\n{"model":{"model_path":"/models/Fixture-7B"},"data":{"max_seq_len":2048},"train":{}}'));
+for (const [task, configLog] of [
+  ['SFT', 'VeOmni\n{"model":{"model_path":"/models/Fixture-7B"},"data":{"max_seq_len":2048},"train":{}}'],
+  ['RL', 'actor_num_nodes .... 1\nhf_checkpoint .... /models/Fixture-7B'],
+]) test(`config-only ${task} results can be reviewed, copied and saved without a step range`, async () => {
+  const f = fixture(); f.state.task = task;
+  await f.choose(file(configLog));
   await f.analyze();
   assert.equal(f.context.currentStage, 2); assert.equal(f.state.parsed.totalCount, 0);
   vm.runInContext(section('function renderRangeStatus(', 'function renderReview('), f.context);
@@ -247,7 +250,7 @@ test('config-only VeOmni results can be reviewed, copied and saved without a ste
   f.state.initial = { MFU: '', 吞吐TPS: '', 单步耗时s: '' };
   vm.runInContext(section("$('#save-history').addEventListener", 'function download('), f.context);
   await f.$('#save-history').click({ currentTarget: f.$('#save-history') });
-  assert.equal(captured.task, 'SFT'); assert.equal(captured.analysis.count, 0);
+  assert.equal(captured.task, task); assert.equal(captured.analysis.count, 0);
   assert.equal(captured.row.MFU, ''); assert.equal(captured.row['吞吐TPS'], ''); assert.equal(reset, true);
   const normal = parseLog('SFT', '{"task":"SFT","step":1,"tps_unit":"tokens/s","tps":100}');
   f.context.renderRangeStatus(normal);

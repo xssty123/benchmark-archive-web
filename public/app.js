@@ -47,7 +47,7 @@ function selectTask(task) {
     el.setAttribute('aria-pressed', String(el.dataset.task === task));
   });
   $('#parser-hint').textContent = task === 'RL' ?
-    'RL 支持 verl 的逐步文本日志，保留日志原有吞吐口径' :
+    'RL 支持 verl、slime 原始日志；吞吐口径见解析说明' :
     'SFT 支持 VeOmni 原始日志及标准化 JSONL；配置逐字段识别，未记录的性能数据留空';
   $('#parser-hint').classList.toggle('support-notice', task === 'SFT');
 }
@@ -178,7 +178,7 @@ async function editRecord(record) {
 }
 function renderRangeStatus(p) {
   $('.range-panel').hidden = p.totalCount === 0;
-  $('#coverage').textContent = p.totalCount === 0 ? '已识别 VeOmni 日志配置，未找到带明确步号的性能数据；性能字段留空，可核对、复制和保存配置' : `日志共 ${p.totalCount} 步（${p.totalFirst}–${p.totalLast}） · 当前统计 ${p.count} 步（${p.range.start}–${p.range.end}），逐步算术平均` +
+  $('#coverage').textContent = p.totalCount === 0 ? '已识别日志配置，未找到可用性能数据；性能字段留空，可核对、复制和保存配置' : `日志共 ${p.totalCount} 步（${p.totalFirst}–${p.totalLast}） · 当前统计 ${p.count} 步（${p.range.start}–${p.range.end}），逐步算术平均` +
     (p.gaps ? ` · 所选范围有 ${p.gaps} 个步号未记录` : '');
   for (const [id, value] of [['range-start', p.range.start], ['range-end', p.range.end]]) {
     const input = $('#' + id); input.min = p.totalFirst; input.max = p.totalLast; input.value = value ?? ''; input.disabled = p.totalCount === 0;
@@ -227,7 +227,7 @@ function renderReview(preserved = {}) {
       const dimensions = [LAYERS, EXPERTS].includes(key);
       const fieldHint = ({ 'A5/A3（无基线不填写）': '填可比运行的吞吐比，无基线留空', 'resharding耗时': '采用 update_weights 阶段总耗时' })[key] || (key === COMPLETENESS ? '默认满血，可改为减层；减层时填写实际数/总数' : dimensions ?
         defaults.source ? `满血默认总数 · ${defaults.source.scope}${key === EXPERTS ? ' · 每层路由专家总数' : ''}` : '待填写总数；减层时填写实际数/总数' : '');
-      html += `<div class="form-field"><label for="field-${index}">${escape(key)}${key.includes('MFU') ? '（%）' : ''}${key === '模型' ? ' *' : ''}</label><input id="field-${index}" data-column="${escape(key)}" value="${escape(initial[key])}" ${metric ? `type="number" min="0" step="any"${key.includes('MFU') ? ' max="100"' : ''}` : 'type="text" placeholder="未提供，留空"'} ${key === '模型' ? 'required' : ''}>${metric ? `<small>${escape(p.estimatedStepTime && key === '单步耗时s' ? '进度条 s/it（估算）' : metric.key)} · ${metric.validCount}/${p.count} 步${metric.reason ? ' · ' + escape(metric.reason) : ''}</small>` : source ? `<small>来源：${escape(source)}</small>` : ''}</div>`;
+      html += `<div class="form-field"><label for="field-${index}">${escape(key)}${key.includes('MFU') ? '（%）' : ''}${key === '模型' ? ' *' : ''}</label><input id="field-${index}" data-column="${escape(key)}" value="${escape(initial[key])}" ${metric ? `type="number" min="0" step="any"${key.includes('MFU') ? ' max="100"' : ''}` : 'type="text" placeholder="未提供，留空"'} ${key === '模型' ? 'required' : ''}>${metric ? `<small>${escape(p.estimatedStepTime && key === '单步耗时s' ? '进度条 s/it（估算）' : metric.key === 'unsupported_mfu' ? 'slime 未直接记录 MFU' : metric.key)} · ${metric.validCount}/${p.count} 步${metric.reason ? ' · ' + escape(metric.reason) : ''}</small>` : source ? `<small>来源：${escape(source)}</small>` : ''}</div>`;
       if (fieldHint) html = html.slice(0, -6) + `<small>${escape(fieldHint)}${dimensions && defaults.source ? ` · <a href="${defaults.source.url}" target="_blank" rel="noopener noreferrer">模型配置 ↗</a>` : ''}</small></div>`;
     }
   }

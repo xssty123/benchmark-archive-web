@@ -1,5 +1,6 @@
 import { extractConfig } from './config.js';
 import { isVeOmniLog, extractVeOmniConfig, veomniMetricRecords } from './veomni.js';
+import { isSlimeLog, extractSlimeConfig, slimeRecords, SLIME_FIELDS } from './slime.js';
 // Explicit adapters only: do not infer task type, units or defaults from model names.
 export const RL_FIELDS = {
   '训练MFU': 'perf/mfu/actor', '吞吐TPS': 'perf/throughput',
@@ -47,6 +48,10 @@ function summarize(rows, fields, unsupportedMFU = false, estimatedStepTime = fal
 }
 
 export function parseRL(text) {
+  if (isSlimeLog(text)) {
+    if (/\bstep\s*:\s*\d+\s+-\s+perf\/throughput/.test(text)) throw new Error('同时发现 slime 和 verl 日志，请先拆分不同运行记录');
+    return parseSlimeRL(text);
+  }
   const rows = new Map();
   const lines = text.replace(ANSI, '').split(/\r?\n/);
   lines.forEach((line, index) => {
@@ -68,6 +73,20 @@ export function parseRL(text) {
   return withRecords(rows, RL_FIELDS, /MFU will always be zero/i.test(text), {
     unit: 'tokens/s/device', adapter: 'verl-text-v1', configuration: extractConfig(text),
   });
+}
+
+function parseSlimeRL(text) {
+  const configuration = extractSlimeConfig(text), parsed = slimeRecords(text), rows = new Map();
+  for (const record of parsed.records) addStep(rows, record.step, record.values, record.line);
+  configuration.notes.push(...parsed.notes);
+  const metadata = { adapter: 'slime-text-v1', unit: 'tokens/s（训练阶段，全局）', configuration };
+  if (rows.size) return withRecords(rows, SLIME_FIELDS, false, metadata);
+  const reason = '未找到受支持的 slime perf 指标，缺失字段留空';
+  configuration.notes.push('未识别到 perf <rollout_id>: {...} 中可填写的性能字段；仅有 TFLOPS、生成吞吐或无步号 Timer 输出时不推算主表指标');
+  return { ...metadata, count: 0, steps: [], first: null, last: null, gaps: 0, sources: {},
+    records: [], fields: SLIME_FIELDS, unsupportedMFU: false, totalCount: 0, totalFirst: null, totalLast: null,
+    range: { start: null, end: null }, metrics: Object.fromEntries(Object.entries(SLIME_FIELDS).map(([label, key]) =>
+      [label, { key, mean: null, validCount: 0, missing: [], invalid: [], reason }])) };
 }
 
 export function parseSFT(text) {
