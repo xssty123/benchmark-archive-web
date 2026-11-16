@@ -34,19 +34,34 @@ export function readLiteral(text) {
     if (c === '{' || c === '[' || c === '(') {
       i++; const dict = c === '{', close = dict ? '}' : c === '[' ? ']' : ')';
       const out = dict ? Object.create(null) : [];
-      ws();
-      while (text[i] !== close) {
-        const item = value(depth + 1); ws();
-        if (dict) {
-          if (typeof item !== 'string' || text[i++] !== ':') fail('Invalid dict');
-          const next = value(depth + 1);
-          if (Object.hasOwn(out, item)) fail('Duplicate config key');
-          out[item] = next;
-        } else out.push(item);
-        ws(); if (i >= text.length) fail('Incomplete literal');
-        if (text[i] === ',') { i++; ws(); } else if (text[i] !== close) fail('Invalid separator');
+      try {
+        ws();
+        while (text[i] !== close) {
+          const item = value(depth + 1); ws();
+          let next;
+          if (dict) {
+            if (typeof item !== 'string' || text[i++] !== ':') fail('Invalid dict');
+            if (Object.hasOwn(out, item)) fail('Duplicate config key');
+            try { next = value(depth + 1); }
+            catch (error) {
+              if (error.partial && !error.fatal) out[item] = error.partial;
+              throw error;
+            }
+          }
+          ws();
+          if (i >= text.length) fail('Incomplete literal');
+          if (text[i] !== ',' && text[i] !== close) fail('Invalid separator');
+          // Commit a field only after its value and delimiter have been validated.
+          if (dict) out[item] = next; else out.push(item);
+          if (text[i] === ',') { i++; ws(); }
+        }
+        i++; return out;
+      } catch (error) {
+        error.fatal = error.fatal || error.message === 'Duplicate config key';
+        if (dict && !error.fatal) error.partial = out;
+        else delete error.partial;
+        throw error;
       }
-      i++; return out;
     }
     const token = text.slice(i).match(/^(?:True|False|None|true|false|null|[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[-+]?\d+)?)/i)?.[0];
     if (!token) fail('Unsupported literal');
@@ -66,7 +81,7 @@ export function cleanConfigLog(text) {
       /^[ \t]*\[(?:\d{1,3};)*\d{1,3}m/, // A pasted ANSI prefix may lose its ESC byte.
       /^[ \t]*\([^\n)]*\bpid=\d+[^)]*\)[ \t]?/,
       /^[ \t]*\[rank[ \t]*\d+\][ \t]*:?[ \t]*/i,
-      /^[ \t]*(?:\[\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?\]|\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?)[ \t]*(?:[-|][ \t]*)?/,
+      /^[ \t]*(?:\[\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?\]|\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?)[ \t]*(?:[-|:][ \t]*)?/,
       /^[ \t]*(?:\[(?:DEBUG|INFO|WARNING|WARN|ERROR|CRITICAL)\]|(?:DEBUG|INFO|WARNING|WARN|ERROR|CRITICAL)\b)[ \t]*(?:[-:|][ \t]*)?/,
     ];
     for (;;) {
@@ -75,6 +90,58 @@ export function cleanConfigLog(text) {
       line = line.replace(prefix, '');
     }
   }).join('\n');
+}
+
+// Ray stdout/stderr records may share a physical line. Split only outside strings.
+function raySegments(line) {
+  const starts = [0]; let quote = '', escaped = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (c === '\\') escaped = true;
+      else if (c === quote) quote = '';
+    } else if (c === '"' || c === "'") quote = c;
+    else if (c === '(') {
+      const marker = line.slice(i).match(/^\([^\n)]*\bpid=\d+[^)]*\)/);
+      if (marker) { if (i) starts.push(i); i += marker[0].length - 1; }
+    }
+  }
+  return starts.map((start, index) => line.slice(start, starts[index + 1]));
+}
+
+function prepareConfigLog(text) {
+  const ignored = new Set(); let depth = 0, quote = '', escaped = false, owner = '', warningSource = false;
+  const lines = text.replace(/(?:\x1b|\\x1b|\\u001b)\[[0-?]*[ -/]*[@-~]/gi, '').split(/\r\n|\n|\r/);
+  const clean = lines.map((line, lineIndex) => raySegments(line).map(segment => {
+    const body = cleanConfigLog(segment), trimmed = body.trim();
+    const origin = segment.match(/\([^\n)]*\bpid=\d+[^)]*\)/)?.[0] || segment.match(/\[rank\s*\d+\]/i)?.[0] || '';
+    const dataLine = /^(?:[{'"\[\]})]|[-+]?\d|True\b|False\b|None\b|true\b|false\b|null\b)/.test(trimmed);
+    const logLevel = /(?:^|\s|\))(?:\[?(?:INFO|DEBUG|WARNING|WARN|ERROR|CRITICAL)\]?)(?=[:\s])/.test(segment);
+    const warning = /^(?:.*\.py:\d+:\s*(?:\w*Warning|\w*Error):)/.test(trimmed);
+    const source = warningSource && /^(?:self\.\w+\s*=|if\s+.+:\s*$|warnings\.warn\()/.test(trimmed);
+    if ((!dataLine && warning) || source || (logLevel && !dataLine)) {
+      if (depth) ignored.add(lineIndex + 1);
+      warningSource = warning || source;
+      return '';
+    }
+    if (trimmed) warningSource = false;
+    // Never join a second worker's literal-looking output into the active config.
+    if (depth && owner && origin && origin !== owner && dataLine) return '__OTHER_WORKER_OUTPUT__';
+    if (!depth && trimmed.startsWith('{')) owner = origin;
+    for (const c of body) {
+      if (quote) {
+        if (escaped) escaped = false;
+        else if (c === '\\') escaped = true;
+        else if (c === quote) quote = '';
+      } else if (depth && (c === '"' || c === "'")) quote = c;
+      else if (c === '{') depth++;
+      else if (c === '}' && depth) depth--;
+    }
+    if (!depth) owner = '';
+    return body;
+  }).join(' ')).join('\n');
+  return { clean, ignored: [...ignored] };
 }
 
 // Balanced outer dictionaries, respecting strings, in a single pass over the log.
@@ -112,16 +179,12 @@ function sameConfig(a, b) {
 }
 
 export function extractConfig(text) {
-  const clean = cleanConfigLog(text), configs = [], problems = [];
+  const { clean, ignored } = prepareConfigLog(text), configs = [], problems = [];
   const lineAt = position => clean.slice(0, position).split('\n').length;
   const empty = warning => ({ fields: {}, evidence: {}, notes: [], warning });
   for (const block of dictionaryBlocks(clean)) {
     if (!/['"]actor_rollout_ref['"]\s*:/.test(block.text)) continue;
     const where = `第 ${lineAt(block.start)} 行开始的配置`;
-    if (!block.complete) {
-      problems.push(`${where}未闭合：可能被截断、日志行交错或含未识别的前缀，请核对该配置块`);
-      continue;
-    }
     try {
       const c = readLiteral(block.text).value;
       if (!c || !Object.hasOwn(c, 'actor_rollout_ref')) {
@@ -136,7 +199,13 @@ export function extractConfig(text) {
         'Invalid separator': '分隔符格式不支持，可能夹杂日志前缀或其他输出', 'Invalid dict': '字典键值格式不支持',
         'Invalid escape': '字符串转义格式不支持', 'Config too deep': '嵌套层级超过支持范围',
         'Incomplete literal': '配置内容不完整', 'Unclosed string': '字符串未闭合' };
-      problems.push(`${where}解析失败（第 ${line} 行）：${reasons[error.message] || '格式暂不支持'}`);
+      const reason = !block.complete ? '配置未闭合或输出中断，未读取到的字段保持为空' : reasons[error.message] || '格式暂不支持';
+      const problem = `${where}解析失败（第 ${line} 行）：${reason}`;
+      const partial = error.partial;
+      const recovered = partial?.actor_rollout_ref && !error.fatal ? mapConfig(partial, text) : null;
+      const useful = recovered && ['模型', '训练后端', '推理后端', '集群规格', '序列'].some(key => recovered.fields[key] !== undefined);
+      if (useful) configs.push({ config: partial, line: lineAt(block.start), recovery: problem });
+      else problems.push(problem);
     }
   }
   if (problems.length) return empty(problems.slice(0, 3).join('；') + '。配置字段未自动填入，请核对或手动填写');
@@ -144,10 +213,12 @@ export function extractConfig(text) {
     if (/\bactor_rollout_ref(?:['"]?\s*:|\.)/.test(clean)) return empty('发现 actor_rollout_ref 配置线索，但未找到完整的字典配置块；YAML、启动参数或被截取的配置片段暂不支持，请提供完整配置打印或手动填写');
     return empty('未找到运行配置：日志中没有识别到包含 actor_rollout_ref 和 trainer 的配置块，请确认日志包含启动时的完整配置打印，或手动填写');
   }
-  if (configs.some(c => !sameConfig(c.config, configs[0].config))) {
+  if ((configs.length > 1 && configs.some(c => c.recovery)) || configs.some(c => !sameConfig(c.config, configs[0].config))) {
     return empty(`发现多份不同运行配置（起始行 ${configs.map(c => c.line).join('、')}），配置字段未自动填入，请先拆分日志`);
   }
-  const result = mapConfig(configs[0].config, clean);
+  const result = mapConfig(configs[0].config, text);
+  if (configs[0].recovery) result.warning = configs[0].recovery + '。仅恢复已完整解析的字段，其余请手动核对';
+  if (ignored.length) result.notes.push(`已排除配置中交错的警告或 INFO 输出（原日志行 ${ignored.slice(0, 12).join('、')}${ignored.length > 12 ? '等' : ''}）`);
   if (!result.fields['模型']) result.notes.push('已解析配置，但 actor_rollout_ref.model.path 缺失或不是有效字符串，模型名称需手动填写');
   return result;
 }

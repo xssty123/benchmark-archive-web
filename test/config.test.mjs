@@ -93,3 +93,85 @@ test('unrelated log braces do not hide a later complete config', () => {
   assert.equal(result.warning, '');
   assert.equal(result.fields['模型'], 'Qwen-Fixture-27B');
 });
+
+const ray = '\x1b[36m(TaskRunnerV1 pid=123)\x1b[0m ';
+const worker = '\x1b[36m(WorkerDict pid=456)\x1b[0m ';
+const warningNoise = [
+  ray + '/fixture/trainer.py:129: UserWarning: Disabled critic as algorithm.adv_estimator != gae',
+  ray + '  self.use_critic = need_critic(self.config)',
+  ray + 'INFO:2026-01-02 03:04:05,690:train and validate dataloader initialized',
+  ray + "INFO:2026-01-02 03:04:05,693:worker group kwargs: {'device_name': 'npu'}",
+  worker + "/fixture/engine.py:32: UserWarning: engine unavailable: ModuleNotFoundError(\"No module named 'fixture'\")",
+  worker + '  warnings.warn(f"engine unavailable: {e!r}", stacklevel=1)',
+];
+const actorFirst = JSON.stringify({ actor_rollout_ref: actor, data: config.data });
+const startTrainer = actorFirst.slice(0, -1) + ", 'trainer': {'del_local_ckpt_after_load': False,";
+
+test('same-line Ray warnings, source echoes and INFO output do not break a complete config', () => {
+  const text = ray + startTrainer + warningNoise[0] + '\n' + warningNoise.slice(1).join('\n') + '\n' +
+    ray + "'nnodes': 2, 'n_gpus_per_node': 8}}\n" + metrics;
+  const result = parseRL(text);
+  assert.equal(result.configuration.warning, '');
+  assert.equal(result.configuration.fields['模型'], 'Qwen-Fixture-27B');
+  assert.equal(result.configuration.fields['集群规格'], '16P');
+  assert.equal(result.configuration.fields['训练后端'], 'VeOmni');
+  assert.match(result.configuration.notes.join('\n'), /交错.*原日志行 1/);
+  assert.equal(result.metrics['吞吐TPS'].mean, 100);
+});
+
+test('interrupted config retains only complete actor fields without inventing trainer values', () => {
+  const text = ray + startTrainer + warningNoise[0] + '\n' + warningNoise.slice(1).join('\n');
+  const result = extractConfig(text);
+  assert.equal(result.fields['模型'], 'Qwen-Fixture-27B');
+  assert.equal(result.fields['训练后端'], 'VeOmni');
+  assert.equal(result.fields['集群规格'], undefined);
+  assert.equal(result.fields['同步/异步'], undefined);
+  assert.match(result.warning, /未闭合.*仅恢复已完整解析/);
+});
+
+test('unknown values preserve earlier verified fields but not partial expressions or lists', () => {
+  const text = startTrainer + "'nnodes': 2 + unknown(), 'n_gpus_per_node': 8}}";
+  const result = extractConfig(text);
+  assert.equal(result.fields['模型'], 'Qwen-Fixture-27B');
+  assert.equal(result.fields['集群规格'], undefined);
+  assert.match(result.warning, /仅恢复已完整解析/);
+  try {
+    readLiteral("{'safe': 7, 'bad': [1, unsupported()], 'later': 9}");
+    assert.fail('must reject unsupported value');
+  } catch (error) {
+    assert.equal(error.partial.safe, 7);
+    assert.equal(error.partial.bad, undefined);
+    assert.equal(error.partial.later, undefined);
+  }
+});
+
+test('duplicate keys and multiple runs still fail instead of selecting a partial result', () => {
+  const duplicate = startTrainer + "'nnodes': 2, 'nnodes': 3, 'n_gpus_per_node': 8}}";
+  assert.deepEqual(extractConfig(duplicate).fields, {});
+  assert.match(extractConfig(duplicate).warning, /重复字段/);
+  const mixed = dump + '\n' + startTrainer;
+  assert.deepEqual(extractConfig(mixed).fields, {});
+  assert.match(extractConfig(mixed).warning, /多份不同运行配置/);
+});
+
+test('literal-looking output from another Ray worker cannot supply trainer fields', () => {
+  const text = ray + startTrainer + '\n' + worker + "'nnodes': 99, 'n_gpus_per_node': 99," + '\n' + ray + '}}';
+  const result = extractConfig(text);
+  assert.equal(result.fields['模型'], 'Qwen-Fixture-27B');
+  assert.equal(result.fields['集群规格'], undefined);
+  assert.match(result.warning, /仅恢复已完整解析/);
+});
+
+test('logger-like strings inside quoted config values are not removed', () => {
+  const model = '/models/(TaskRunnerV1 pid=123) INFO:fixture';
+  const text = JSON.stringify({ actor_rollout_ref: { model: { path: model } }, trainer: {} });
+  assert.equal(extractConfig(ray + text).fields['模型'], '(TaskRunnerV1 pid=123) INFO:fixture');
+});
+
+test('warning-like text inside a config string remains data', () => {
+  const withText = { ...config, actor_rollout_ref: { ...actor, model: { path: '/models/Qwen-Fixture-27B', description: '/fixture.py:12: UserWarning: example' } } };
+  const result = extractConfig(JSON.stringify(withText, null, 2));
+  assert.equal(result.warning, '');
+  assert.equal(result.fields['模型'], 'Qwen-Fixture-27B');
+  assert.equal(result.notes.some(note => note.includes('交错')), false);
+});
