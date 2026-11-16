@@ -48,7 +48,8 @@ function selectTask(task) {
   });
   $('#parser-hint').textContent = task === 'RL' ?
     'RL 支持 verl 的逐步文本日志，保留日志原有吞吐口径' :
-    'SFT 原型仅支持标准化 JSONL（step / task / tps / tps_unit / step_time_s / mfu），真实框架日志适配待补充';
+    'SFT 仅支持标准化 JSONL，暂不支持直接解析 VeOmni 等训练框架的原始日志';
+  $('#parser-hint').classList.toggle('support-notice', task === 'SFT');
 }
 function renderFiles() {
   $('#analyze').textContent = state.parsed && state.analyzedLog === state.log ? '继续核对 →' : '解析并核对 →';
@@ -57,12 +58,13 @@ function renderFiles() {
 }
 function invalidateAnalysis() {
   state.revision++;
-  Object.assign(state, { parsed: null, analyzedLog: null, savedRecord: null, initial: null, defaultModel: null });
+  Object.assign(state, { parsed: null, analyzedLog: null, savedRecord: null, editingRecord: null, initial: null, defaultModel: null });
   $('#record-form').replaceChildren();
   $('#resume-review').hidden = true;
 }
-function chooseLog(log) {
+async function chooseLog(log) {
   if (log === state.log) return;
+  if (state.log && !await confirmLeave()) { $('#log-input').value = ''; return; }
   if (state.log) clearMaterialLinks();
   invalidateAnalysis();
   state.log = log; state.demo = false;
@@ -95,6 +97,26 @@ $('#material-links').addEventListener('input', event => {
   event.target.setCustomValidity('');
   if (state.parsed) renderRowPreview();
 });
+function rangePending() {
+  return !!state.parsed && (!$('#range-start').value || !$('#range-end').value ||
+    Number($('#range-start').value) !== state.parsed.range.start || Number($('#range-end').value) !== state.parsed.range.end);
+}
+function hasUnsavedChanges() {
+  if (state.parsed) return rangePending() || !state.savedRecord || state.savedRecord.fingerprint !== currentFingerprint();
+  return !!state.log || Object.values(readMaterialLinks()).some(Boolean);
+}
+async function confirmLeave() {
+  if (!hasUnsavedChanges()) return true;
+  const dialog = $('#discard-dialog');
+  dialog.returnValue = 'keep';
+  return new Promise(resolve => {
+    dialog.addEventListener('close', () => resolve(dialog.returnValue === 'discard'), { once: true });
+    dialog.showModal();
+  });
+}
+window.addEventListener('beforeunload', event => {
+  if (hasUnsavedChanges()) { event.preventDefault(); event.returnValue = ''; }
+});
 function reset() {
   invalidateAnalysis();
   clearMaterialLinks();
@@ -104,7 +126,7 @@ function reset() {
   $('#record-form').replaceChildren();
   renderFiles(); stage(1);
 }
-$$('.task').forEach(el => el.addEventListener('click', () => { if (state.task !== el.dataset.task) { reset(); selectTask(el.dataset.task); } }));
+$$('.task').forEach(el => el.addEventListener('click', async () => { if (state.task !== el.dataset.task && await confirmLeave()) { reset(); selectTask(el.dataset.task); } }));
 $('#log-input').addEventListener('change', event => { if (event.target.files[0]) chooseLog(event.target.files[0]); });
 $('#log-drop').addEventListener('dragover', event => { event.preventDefault(); });
 $('#log-drop').addEventListener('drop', event => {
@@ -112,7 +134,8 @@ $('#log-drop').addEventListener('drop', event => {
   if (event.dataTransfer.files.length !== 1) { message('每次请选择一份单次运行日志'); return; }
   chooseLog(event.dataTransfer.files[0]);
 });
-$('#demo').addEventListener('click', () => {
+$('#demo').addEventListener('click', async () => {
+  if (!await confirmLeave()) return;
   reset(); state.demo = true;
   const lines = state.task === 'RL' ? Array.from({ length: 12 }, (_, i) =>
     `step:${i + 1} - perf/throughput:${120 + i * 2} - perf/time_per_step:${190 - i * 2} - timing_s/update_actor:${65 - i} - timing_s/gen:${100 - i} - timing_s/update_weights:4 - perf/mfu/actor:0.13`) :
@@ -122,9 +145,40 @@ $('#demo').addEventListener('click', () => {
   renderFiles(); message('已加载合成演示数据，点击“解析并核对”继续');
 });
 
+function metricInputValues(metrics) {
+  return Object.fromEntries(Object.entries(metrics).map(([key, item]) => [key,
+    item.mean == null ? '' : Number((item.mean * (key.includes('MFU') ? 100 : 1)).toFixed(6))]));
+}
+function historyFormValues(row) {
+  const values = { ...row };
+  for (const key of ['训练MFU', 'MFU']) {
+    if (key in values) {
+      const value = values[key];
+      values[key] = value == null || String(value).trim() === '' ? '' :
+        String(value).trim().endsWith('%') ? String(value).trim().slice(0, -1) : Number(value) * 100;
+    }
+  }
+  return values;
+}
+async function editRecord(record) {
+  let parsed = record.analysis;
+  if (!parsed?.records || !parsed?.range) {
+    if (!record.log) throw new Error('该历史记录缺少原始日志，暂时无法编辑');
+    parsed = parseLog(record.task, await record.log.text());
+  }
+  if (!record.log) throw new Error('该历史记录缺少原始日志，暂时无法编辑');
+  if (!await confirmLeave()) return;
+  reset(); selectTask(record.task);
+  Object.assign(state, { log: record.log, analyzedLog: record.log, demo: !!record.demo,
+    parsed, editingRecord: record });
+  $$('#material-links [data-material]').forEach(input => { input.value = record.row[input.dataset.material] || ''; });
+  renderReview(historyFormValues(record.row));
+  state.savedRecord = { id: record.id, createdAt: record.createdAt, fingerprint: currentFingerprint() };
+  updateSaveStatus(); renderFiles(); stage(2);
+}
 function renderReview(preserved = {}) {
   const p = state.parsed;
-  $('#review-title').textContent = `${state.task} · 核对性能结果${state.demo ? '（演示）' : ''}`;
+  $('#review-title').textContent = `${state.task} · ${state.editingRecord ? '编辑历史记录' : '核对性能结果'}${state.demo ? '（演示）' : ''}`;
   $('#coverage').textContent = `日志共 ${p.totalCount} 步（${p.totalFirst}–${p.totalLast}） · 当前统计 ${p.count} 步（${p.range.start}–${p.range.end}），逐步算术平均` +
     (p.gaps ? ` · 所选范围有 ${p.gaps} 个步号未记录` : '');
   for (const [id, value] of [['range-start', p.range.start], ['range-end', p.range.end]]) {
@@ -137,7 +191,7 @@ function renderReview(preserved = {}) {
   Object.assign(initial, defaults.fields);
   Object.assign(initial, p.configuration?.fields || {});
   initial[BATCH] = formatBatch(parseBatch(initial[BATCH]));
-  Object.entries(p.metrics).forEach(([key, item]) => { initial[key] = item.mean == null ? '' : Number((item.mean * (key.includes('MFU') ? 100 : 1)).toFixed(6)); });
+  Object.assign(initial, metricInputValues(p.metrics));
   initial[state.task === 'RL' ? 'A5场景' : '场景'] = state.task === 'RL' ? 'RL' : '';
   initial[state.task === 'RL' ? '更新时间' : '数据更新时间'] = date();
   initial['备注'] = '';
@@ -146,7 +200,7 @@ function renderReview(preserved = {}) {
     '训练后端': state.task === 'RL' ? 'Megatron Core（演示）' : 'FSDP2（演示）' });
   // Recalculating a range updates metrics only; retain all user-edited configuration and URLs.
   Object.assign(initial, preserved);
-  state.initial = initial;
+  state.initial = metricInputValues(p.metrics);
   $('#parse-details').hidden = !p.configuration?.notes?.length;
   $('#parse-notes').textContent = (p.configuration?.notes || []).join('\n');
   $('#config-status').textContent = p.configuration?.warning || (p.configuration && Object.keys(p.configuration.fields).length ?
@@ -166,8 +220,8 @@ function renderReview(preserved = {}) {
         continue;
       }
       const dimensions = [LAYERS, EXPERTS].includes(key);
-      const fieldHint = ({ 'A5/A3（无基线不填写）': '填可比运行的吞吐比，无基线留空', 'resharding耗时': '采用 update_weights 阶段总耗时', '备注': '仅保存你填写的内容' })[key] || (key === COMPLETENESS ? '默认满血，可改为减层；减层时填写实际数/总数' : dimensions ?
-        defaults.source ? `满血默认总数 · ${defaults.source.scope} · 专家数指每层路由专家总数` : '待填写总数；减层时填写实际数/总数' : '');
+      const fieldHint = ({ 'A5/A3（无基线不填写）': '填可比运行的吞吐比，无基线留空', 'resharding耗时': '采用 update_weights 阶段总耗时' })[key] || (key === COMPLETENESS ? '默认满血，可改为减层；减层时填写实际数/总数' : dimensions ?
+        defaults.source ? `满血默认总数 · ${defaults.source.scope}${key === EXPERTS ? ' · 每层路由专家总数' : ''}` : '待填写总数；减层时填写实际数/总数' : '');
       html += `<div class="form-field"><label for="field-${index}">${escape(key)}${key.includes('MFU') ? '（%）' : ''}${key === '模型' ? ' *' : ''}</label><input id="field-${index}" data-column="${escape(key)}" value="${escape(initial[key])}" ${metric ? `type="number" min="0" step="any"${key.includes('MFU') ? ' max="100"' : ''}` : 'type="text" placeholder="未提供，留空"'} ${key === '模型' ? 'required' : ''}>${metric ? `<small>${escape(metric.key)} · ${metric.validCount}/${p.count} 步${metric.reason ? ' · ' + escape(metric.reason) : ''}</small>` : source ? `<small>来源：${escape(source)}</small>` : ''}</div>`;
       if (fieldHint) html = html.slice(0, -6) + `<small>${escape(fieldHint)}${dimensions && defaults.source ? ` · <a href="${defaults.source.url}" target="_blank" rel="noopener noreferrer">模型配置 ↗</a>` : ''}</small></div>`;
     }
@@ -199,7 +253,6 @@ async function copyCurrentRow() {
   if (!prepareCurrentRow()) return;
   renderRowPreview();
   await copyTableRow(state.task, currentPreviewRow(), '#copy-status', '#copy-fallback');
-  $('#copy-footer-status').textContent = $('#copy-status').textContent;
 }
 function renderMetricCards(row) {
   const p = state.parsed, mfu = state.task === 'RL' ? '训练MFU' : 'MFU';
@@ -230,7 +283,6 @@ function renderRowPreview() {
   renderMetricCards(currentRow());
   $('#row-preview-table').innerHTML = `<table><thead><tr>${columns.map(key => `<th scope="col">${escape(key)}</th>`).join('')}</tr></thead><tbody><tr>${columns.map(key => `<td>${escape(row[key])}</td>`).join('')}</tr></tbody></table>`;
   $('#copy-status').textContent = '';
-  $('#copy-footer-status').textContent = '可在上方复制整行；保存到历史记录后开始下一份';
   updateSaveStatus();
   $('#copy-fallback').classList.add('hidden');
 }
@@ -263,6 +315,7 @@ function applyRange(start = Number($('#range-start').value), end = Number($('#ra
   state.parsed = selected;
   renderReview(preserved); message('');
 }
+['#range-start', '#range-end'].forEach(selector => $(selector).addEventListener('input', () => { if (state.parsed) updateSaveStatus(); }));
 $('#range-apply').addEventListener('click', event => safely(event.currentTarget, async () => applyRange()));
 $('#range-reset').addEventListener('click', event => safely(event.currentTarget, async () => {
   $('#range-start').value = state.parsed.totalFirst;
@@ -300,7 +353,7 @@ function validateCurrentRow() {
 function prepareCurrentRow() {
   if (!validateMaterialLinks()) return false;
   if (!state.parsed || state.analyzedLog !== state.log) throw new Error('日志已更换，请先解析当前日志');
-  if (!$('#range-start').value || !$('#range-end').value || Number($('#range-start').value) !== state.parsed.range.start || Number($('#range-end').value) !== state.parsed.range.end) applyRange();
+  if (rangePending()) throw new Error('统计范围尚未应用，请先点击“应用范围”并核对重算结果，再复制或保存');
   if (!$('#record-form').reportValidity()) return false;
   validateCurrentRow();
   return true;
@@ -310,16 +363,18 @@ function currentFingerprint() {
 }
 function updateSaveStatus() {
   const saved = state.savedRecord;
-  $('#save-history').textContent = '保存并解析下一份日志 →';
+  $('#save-history').textContent = state.editingRecord ? '保存修改并返回历史记录 →' : '保存并解析下一份日志 →';
   $('#save-status').textContent = !saved ? '尚未保存到历史记录' :
-    saved.fingerprint === currentFingerprint() ? '已保存到历史记录' : '有修改尚未保存，点击“保存并解析下一份日志”继续';
+    !rangePending() && saved.fingerprint === currentFingerprint() ? '已保存到历史记录' : '有修改尚未保存';
 }
 $('#save-history').addEventListener('click', event => safely(event.currentTarget, async () => {
   if (!prepareCurrentRow()) return;
   const previous = state.savedRecord;
   const row = currentRow();
   const now = new Date().toISOString();
+  const editing = state.editingRecord;
   const record = {
+    ...editing,
     id: previous?.id || `${state.task}-${date().replaceAll('-', '')}-${crypto.randomUUID()}`,
     task: state.task, demo: state.demo, row, analysis: state.parsed,
     editedMetrics: Object.keys(state.parsed.metrics).filter(key => String(key.includes('MFU') && state.initial[key] !== '' ? Number(state.initial[key]) / 100 : state.initial[key]) !== String(row[key])),
@@ -340,7 +395,8 @@ $('#save-history').addEventListener('click', event => safely(event.currentTarget
   state.filter = record.task;
   $$('[data-filter]').forEach(el => el.classList.toggle('selected', el.dataset.filter === state.filter));
   reset();
-  message('已保存到历史记录，请选择下一份日志');
+  if (editing) await showRecords();
+  message(editing ? '历史记录已更新' : '已保存到历史记录，请选择下一份日志');
 }));
 
 function download(blob, name) {
@@ -365,8 +421,9 @@ function renderHistory() {
   // Full approved schema, including the three links at the end; horizontal scrolling keeps every field accessible.
   $('#history').innerHTML = `<table><thead><tr><th>操作</th>${schema[state.filter].map(key => `<th>${escape(key)}</th>`).join('')}</tr></thead><tbody>${records.map(record => {
     const row = displayRow(record);
-    return `<tr><td><button data-copy-record="${record.id}">复制整行</button><button data-zip="${record.id}">本地备份</button><button data-csv="${record.id}">CSV</button><button class="delete-record" data-delete="${record.id}">删除</button>${record.demo ? '<span class="badge">演示</span>' : ''}</td>${schema[state.filter].map(key => `<td>${schema[state.filter].slice(-3).includes(key) && row[key] ? `<a href="${escape(row[key])}" target="_blank" rel="noopener noreferrer">打开 ↗</a>` : escape(row[key] === '' || row[key] == null ? '—' : row[key])}</td>`).join('')}</tr>`;
+    return `<tr><td><button data-edit-record="${record.id}">编辑</button><button data-copy-record="${record.id}">复制整行</button><button data-zip="${record.id}">本地备份</button><button data-csv="${record.id}">CSV</button><button class="delete-record" data-delete="${record.id}">删除</button>${record.demo ? '<span class="badge">演示</span>' : ''}</td>${schema[state.filter].map(key => `<td>${schema[state.filter].slice(-3).includes(key) && row[key] ? `<a href="${escape(row[key])}" target="_blank" rel="noopener noreferrer">打开 ↗</a>` : escape(row[key] === '' || row[key] == null ? '—' : row[key])}</td>`).join('')}</tr>`;
   }).join('')}</tbody></table>`;
+  $$('[data-edit-record]').forEach(button => button.addEventListener('click', () => safely(button, () => editRecord(records.find(record => record.id === button.dataset.editRecord)))));
   $$('[data-copy-record]').forEach(button => button.addEventListener('click', () => safely(button, async () => {
     const record = records.find(record => record.id === button.dataset.copyRecord);
     await copyTableRow(record.task, displayRow(record), '#history-copy-status', '#history-copy-fallback');
@@ -388,7 +445,9 @@ async function showRecords() {
   $('#new-view').classList.add('hidden'); $('#records-view').classList.remove('hidden');
   $('#nav-new').classList.remove('active'); $('#nav-records').classList.add('active');
 }
-$('#nav-new').addEventListener('click', reset);
+async function startNew() { if (await confirmLeave()) reset(); }
+$('#nav-new').addEventListener('click', startNew);
+$('.brand').addEventListener('click', event => { event.preventDefault(); startNew(); });
 $('#resume-review').addEventListener('click', () => {
   if (state.log) stage(state.parsed && state.analyzedLog === state.log ? 2 : 1);
 });
