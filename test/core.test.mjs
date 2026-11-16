@@ -244,3 +244,17 @@ test('clipboard values cannot add rows, columns, formulas or HTML markup', () =>
   assert.ok(!copied.html.includes('<img'));
   assert.ok(copied.text.includes('""text""'));
 });
+
+test('MFU ratios render as percentages for old and new RL/SFT history without changing stored data', () => {
+  for (const key of ['训练MFU', 'MFU']) {
+    for (const [value, expected] of [[0.13, '13%'], ['0.005', '0.5%'], [0, '0%'], [1, '100%'], [0.123456, '12.35%'], ['13%', '13%'], ['', ''], [null, ''], [undefined, ''], [-1, ''], [1.01, '']]) {
+      const record = { row: { [key]: value } };
+      const row = displayRow(record);
+      assert.equal(row[key], expected);
+      assert.equal(record.row[key], value);
+      assert.equal(displayRow({ row })[key], expected);
+      assert.equal(clipboardRow([key], row).text, expected);
+      assert.equal(makeCsv([key], row).includes(expected), true);
+    }
+  }
+});

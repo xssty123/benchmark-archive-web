@@ -27,6 +27,14 @@ export function parseBatch(value, dynamic = false) {
 export function formatBatch(parts) {
   return ['MBS', 'GBS', 'GAS'].map((label, i) => `${label}=${String(parts[i] ?? '').trim() || '未记录'}`).join('；');
 }
+// Old records keep ratios; percent strings are also accepted without scaling twice.
+export function formatMfu(value) {
+  if (value == null || String(value).trim() === '') return '';
+  const text = String(value).trim();
+  const percent = text.endsWith('%') ? Number(text.slice(0, -1)) : Number(text) * 100;
+  if (!Number.isFinite(percent) || percent < 0 || percent > 100) return '';
+  return `${Number(percent.toFixed(2))}%`;
+}
 export function displayRow(record) {
   const parts = parseBatch(record.row[BATCH], /动态\s*batch/i.test(record.row['备注'] || ''));
   const batch = parts.map(value => {
@@ -35,6 +43,9 @@ export function displayRow(record) {
     return value;
   }).join('/');
   const row = { ...record.row, [BATCH]: batch };
+  for (const key of ['训练MFU', 'MFU']) {
+    if (key in row) row[key] = formatMfu(row[key]);
+  }
   if (row['重计算']) {
     const normalized = normalizeRecompute(row['重计算'], {
       model: row['模型'], backend: row['训练后端'], stage: record.analysis?.configuration?.modelStage,

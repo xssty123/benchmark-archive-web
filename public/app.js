@@ -2,7 +2,7 @@ import { parseLog, selectRange } from './parser.js';
 import { makeCsv, zipRecord } from './archive.js';
 import { saveRecord, listRecords, deleteRecord } from './storage.js';
 import { clipboardRow } from './copy-row.js';
-import { BATCH, COMPLETENESS, LAYERS, EXPERTS, modelDefaults, parseBatch, formatBatch, displayRow } from './record-fields.js';
+import { BATCH, COMPLETENESS, LAYERS, EXPERTS, modelDefaults, parseBatch, formatBatch, displayRow, formatMfu } from './record-fields.js';
 
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
@@ -108,7 +108,7 @@ function renderReview(preserved = {}) {
   Object.assign(initial, defaults.fields);
   Object.assign(initial, p.configuration?.fields || {});
   initial[BATCH] = formatBatch(parseBatch(initial[BATCH]));
-  Object.entries(p.metrics).forEach(([key, item]) => { initial[key] = item.mean == null ? '' : Number(item.mean.toFixed(6)); });
+  Object.entries(p.metrics).forEach(([key, item]) => { initial[key] = item.mean == null ? '' : Number((item.mean * (key.includes('MFU') ? 100 : 1)).toFixed(6)); });
   initial[state.task === 'RL' ? 'A5场景' : '场景'] = state.task === 'RL' ? 'RL' : '';
   initial[state.task === 'RL' ? '更新时间' : '数据更新时间'] = date();
   initial['备注'] = '';
@@ -141,7 +141,7 @@ function renderReview(preserved = {}) {
       const dimensions = [LAYERS, EXPERTS].includes(key);
       const fieldHint = key === COMPLETENESS ? '默认满血，可改为减层；减层时填写实际数/总数' : dimensions ?
         defaults.source ? `满血默认总数 · ${defaults.source.scope} · 专家数指每层路由专家总数` : '待填写总数；减层时填写实际数/总数' : '';
-      html += `<div class="form-field"><label for="field-${index}">${escape(key)}${key === '模型' ? ' *' : ''}</label><input id="field-${index}" data-column="${escape(key)}" value="${escape(initial[key])}" ${link ? 'type="url" placeholder="可留空，或粘贴云空间 HTTPS 链接"' : metric ? 'type="number" min="0" step="any"' : 'type="text" placeholder="未提供，留空"'} ${key === '模型' ? 'required' : ''}>${metric ? `<small>${escape(metric.key)} · ${metric.validCount}/${p.count} 步${metric.reason ? ' · ' + escape(metric.reason) : ''}</small>` : source ? `<small>来源：${escape(source)}</small>` : ''}</div>`;
+      html += `<div class="form-field"><label for="field-${index}">${escape(key)}${key.includes('MFU') ? '（%）' : ''}${key === '模型' ? ' *' : ''}</label><input id="field-${index}" data-column="${escape(key)}" value="${escape(initial[key])}" ${link ? 'type="url" placeholder="可留空，或粘贴云空间 HTTPS 链接"' : metric ? `type="number" min="0" step="any"${key.includes('MFU') ? ' max="100"' : ''}` : 'type="text" placeholder="未提供，留空"'} ${key === '模型' ? 'required' : ''}>${metric ? `<small>${escape(metric.key)} · ${metric.validCount}/${p.count} 步${metric.reason ? ' · ' + escape(metric.reason) : ''}</small>` : source ? `<small>来源：${escape(source)}</small>` : ''}</div>`;
       if (fieldHint) html = html.slice(0, -6) + `<small>${escape(fieldHint)}${dimensions && defaults.source ? ` · <a href="${defaults.source.url}" target="_blank" rel="noopener noreferrer">模型配置 ↗</a>` : ''}</small></div>`;
     }
   }
@@ -182,18 +182,25 @@ function renderMetricCards(row) {
     const empty = value === '' || value == null;
     const valid = !empty && Number.isFinite(Number(value)) && Number(value) >= 0 &&
       (key !== mfu || Number(value) <= 1) && (key !== '单步耗时s' || Number(value) > 0);
-    const unit = key === '吞吐TPS' ? p.unit : key === mfu ? '小数比例 · 非百分数' : '秒 / step';
+    const unit = key === '吞吐TPS' ? p.unit : key === mfu ? '百分比' : '秒 / step';
     const hint = empty ? metric.reason || '未填写' : valid ? unit : '请检查输入值';
-    return `<div class="metric"><small>${escape(key)}</small><strong>${valid ? format(value) : '—'}</strong><small>${escape(hint)}</small></div>`;
+    return `<div class="metric"><small>${escape(key)}</small><strong>${valid ? (key === mfu ? formatMfu(value) : format(value)) : '—'}</strong><small>${escape(hint)}</small></div>`;
   }).join('');
 }
-function currentPreviewRow() {
+function currentRow() {
   const row = Object.fromEntries($$('#record-form [data-column]').map(input => [input.dataset.column, input.dataset.column === '备注' ? input.value : input.value.trim()]));
-  return displayRow({ row });
+  // Inputs use percent units; stored records and parsed metrics retain ratios.
+  for (const key of ['训练MFU', 'MFU']) {
+    if (row[key] !== undefined && row[key] !== '') row[key] = Number(row[key]) / 100;
+  }
+  return row;
+}
+function currentPreviewRow() {
+  return displayRow({ row: currentRow() });
 }
 function renderRowPreview() {
   const row = currentPreviewRow(), columns = schema[state.task];
-  renderMetricCards(row);
+  renderMetricCards(currentRow());
   $('#row-preview-table').innerHTML = `<table><thead><tr>${columns.map(key => `<th scope="col">${escape(key)}</th>`).join('')}</tr></thead><tbody><tr>${columns.map(key => `<td>${escape(row[key])}</td>`).join('')}</tr></tbody></table>`;
   $('#copy-status').textContent = '';
   $('#copy-footer-status').textContent = '可在上方复制整行；保存到历史记录后开始下一份';
@@ -256,8 +263,8 @@ function validateCurrentRow() {
   for (const key of Object.keys(state.parsed.metrics)) {
     if (row[key] === '') continue;
     const value = Number(row[key]);
-    if (!Number.isFinite(value) || value < 0 || (key.includes('MFU') && value > 1) || (key === '单步耗时s' && value === 0)) {
-      throw new Error(`${key}无效：耗时应大于零，MFU 使用 0–1 小数比例`);
+    if (!Number.isFinite(value) || value < 0 || (key.includes('MFU') && value > 100) || (key === '单步耗时s' && value === 0)) {
+      throw new Error(`${key}无效：耗时应大于零，MFU 使用 0–100 百分比数值（例如 13 表示 13%）`);
     }
   }
   for (const key of schema[state.task].slice(-3)) {
@@ -273,7 +280,7 @@ function prepareCurrentRow() {
   return true;
 }
 function currentFingerprint() {
-  return JSON.stringify({ row: currentPreviewRow(), range: state.parsed.range });
+  return JSON.stringify({ row: currentRow(), range: state.parsed.range });
 }
 function updateSaveStatus() {
   const saved = state.savedRecord;
@@ -284,12 +291,12 @@ function updateSaveStatus() {
 $('#save-history').addEventListener('click', event => safely(event.currentTarget, async () => {
   if (!prepareCurrentRow()) return;
   const previous = state.savedRecord;
-  const row = currentPreviewRow();
+  const row = currentRow();
   const now = new Date().toISOString();
   const record = {
     id: previous?.id || `${state.task}-${date().replaceAll('-', '')}-${crypto.randomUUID()}`,
     task: state.task, demo: state.demo, row, analysis: state.parsed,
-    editedMetrics: Object.keys(state.parsed.metrics).filter(key => String(state.initial[key]) !== String(row[key])),
+    editedMetrics: Object.keys(state.parsed.metrics).filter(key => String(key.includes('MFU') && state.initial[key] !== '' ? Number(state.initial[key]) / 100 : state.initial[key]) !== String(row[key])),
     createdAt: previous?.createdAt || now, updatedAt: now, log: state.log,
   };
   const fingerprint = currentFingerprint();

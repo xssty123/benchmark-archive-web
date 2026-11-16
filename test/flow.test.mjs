@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import vm from 'node:vm';
+import { formatMfu } from '../public/record-fields.js';
 import { parseLog } from '../public/parser.js';
 
 // Exercise the real browser handlers with controlled file reads and minimal DOM adapters.
@@ -59,10 +60,29 @@ test('metric cards follow edited, zero and blank values without falling back to 
   const f = fixture(); f.state.parsed = { unit: 'tokens/s/device', metrics: {
     '吞吐TPS': { mean: 131 }, '单步耗时s': { mean: 179 }, '训练MFU': { mean: null, reason: '不支持' },
   } };
-  f.context.escape = String; f.context.format = String;
+  f.context.escape = String; f.context.format = String; f.context.formatMfu = formatMfu;
   vm.runInContext(section('function renderMetricCards(', 'function currentPreviewRow()'), f.context);
   f.context.renderMetricCards({ '吞吐TPS': '999', '单步耗时s': '', '训练MFU': '0' });
   const html = f.$('#metric-cards').innerHTML;
-  assert.match(html, /<strong>999<\/strong>/); assert.match(html, /<strong>0<\/strong>/);
+  assert.match(html, /<strong>999<\/strong>/); assert.match(html, /<strong>0%<\/strong>/);
   assert.match(html, /<strong>—<\/strong>/); assert.doesNotMatch(html, /131|179|不支持/);
+});
+
+test('MFU percent inputs normalize to ratios and reject values above 100 for both tasks', () => {
+  for (const key of ['训练MFU', 'MFU']) {
+    const f = fixture();
+    const inputs = [{ dataset: { column: '模型' }, value: 'Demo' }, { dataset: { column: key }, value: '13' }];
+    f.context.$$ = () => inputs;
+    f.context.schema = { RL: ['环境信息', '日志存档', 'profiling采集'] };
+    f.state.parsed = { metrics: { [key]: { mean: 0.13 } } };
+    vm.runInContext(section('function currentRow()', 'function currentPreviewRow()') + '\n' +
+      section('function validateCurrentRow()', 'function prepareCurrentRow()'), f.context);
+    assert.equal(f.context.currentRow()[key], 0.13);
+    assert.doesNotThrow(() => f.context.validateCurrentRow());
+    inputs[1].value = '0.5'; assert.equal(f.context.currentRow()[key], 0.005);
+    inputs[1].value = '100'; assert.doesNotThrow(() => f.context.validateCurrentRow());
+    assert.equal(f.context.currentRow()[key], 1);
+    inputs[1].value = '101'; assert.throws(() => f.context.validateCurrentRow(), /0–100/);
+    inputs[1].value = ''; assert.equal(f.context.currentRow()[key], '');
+  }
 });
