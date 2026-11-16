@@ -123,3 +123,45 @@ test('normalized JSONL and verl RL stay separate from the native VeOmni adapter'
   assert.throws(() => parseSFT(rl), /JSONL/);
   assert.equal(parseRL(rl).metrics['吞吐TPS'].mean, 3);
 });
+
+test('MiniMax component paths and DiT num_layers identify the trained backbone', () => {
+  const c = structuredClone(config);
+  c.model.model_path = 'pretrained_models/MiniMax-H3/MiniMax/MiniMax-H3/FL2VA/transformer';
+  c.data.data_type = 'diffusion'; c.data.max_seq_len = 2048;
+  c.model.accelerator.dp_shard_size = 16;
+  const main = '\nModel config MiniMaxH3DiTModelConfig {"model_type":"MiniMaxH3DiTModel","num_layers":50,"token_refiner_num_layers":2}';
+  const condition = '\nModel config MiniMaxH3ConditionModelConfig {"model_type":"MiniMaxH3ConditionModel","num_layers":7,"text_config":{"num_hidden_layers":7,"num_experts":99},"text_encoder_num_retained_layers":7}';
+  const text = prefix + JSON.stringify(c) + '\nProcess rank: 0, world size: 16\nSet gradient accumulation to 1.\nDetected DiT model type: MiniMaxH3DiTModel.' + main + condition + main;
+  const p = parseSFT(text), f = p.configuration.fields;
+  assert.equal(f['模型'], 'MiniMax-H3'); assert.equal(f['系列'], 'MiniMax');
+  assert.equal(f[LAYERS], 50); assert.equal(f[EXPERTS], undefined);
+  assert.equal(f['序列'], undefined); assert.equal(f['参数'], undefined);
+  assert.equal(f['集群规格'], '16P'); assert.equal(f[BATCH], 'MBS=1；GBS=16；GAS=1');
+  assert.equal(f['重计算'], '全重计算'); assert.equal(p.count, 0);
+  assert.match(p.configuration.notes.join('\n'), /latent/);
+  const broken = parseSFT(text.replaceAll('"num_layers":50', '"num_layers":unknown()'));
+  assert.equal(broken.configuration.fields[LAYERS], '');
+  assert.equal(broken.configuration.fields['模型'], 'MiniMax-H3');
+  assert.equal(broken.configuration.fields[BATCH], 'MBS=1；GBS=16；GAS=1');
+});
+
+test('DiT model selection never uses condition-only or conflicting backbone depths', () => {
+  const c = structuredClone(config); c.data.data_type = 'diffusion'; c.model.model_path = '/models/MiniMax-H3/transformer';
+  const base = prefix + JSON.stringify(c) + '\nDetected DiT model type: MiniMaxH3DiTModel.';
+  const condition = '\nModel config MiniMaxH3ConditionModelConfig {"num_layers":7}';
+  assert.equal(parseSFT(base + condition).configuration.fields[LAYERS], undefined);
+  const first = '\nModel config MiniMaxH3DiTModelConfig {"num_layers":50}';
+  const second = '\nModel config MiniMaxH3DiTModelConfig {"num_layers":48}';
+  const p = parseSFT(base + first + second);
+  assert.equal(p.configuration.fields[LAYERS], '');
+  assert.equal(p.configuration.fields['模型'], 'MiniMax-H3');
+  assert.match(p.configuration.warning, /num_layers.*冲突/);
+});
+
+test('generic unknown component paths stay blank while ordinary model names are unchanged', () => {
+  for (const [path, expected] of [['/models/unlabelled/transformer', undefined], ['/models/Qwen-Fixture-27B', 'Qwen-Fixture-27B'],
+    ['/models/MiniMax-H3', 'MiniMax-H3']]) {
+    const c = structuredClone(config); c.model.model_path = path;
+    assert.equal(parseSFT(prefix + JSON.stringify(c)).configuration.fields['模型'], expected);
+  }
+});

@@ -19,7 +19,7 @@ export function extractVeOmniConfig(text) {
     const prefix = clean.slice(clean.lastIndexOf('\n', block.start - 1) + 1, block.start);
     if (!/['"](?:model|train|data)['"]\s*:/.test(block.text) && !/Model config \S+\s*$/.test(prefix)) continue;
     const parsed = readConfigFields(block.text);
-    const entry = { ...parsed, line: lineAt(block.start), endLine: lineAt(block.start + block.text.length) };
+    const entry = { ...parsed, configClass: prefix.match(/Model config (\S+)\s*$/)?.[1], line: lineAt(block.start), endLine: lineAt(block.start + block.text.length) };
     entry.diagnostics = parsed.issues.map(item => `第 ${lineAt(block.start + item.position)} 行 ${item.path}：${item.reason}`);
     if (parsed.rootKeys.has('train') && (parsed.rootKeys.has('model') || parsed.rootKeys.has('data'))) configs.push(entry);
     else if (/Model config \S+\s*$/.test(prefix)) modelConfigs.push(entry);
@@ -53,12 +53,26 @@ export function extractVeOmniConfig(text) {
     return positive(values[0]) ? values[0] : undefined;
   }
   const get = path => pick(configs, path);
-  const model = leaf(get('model.model_path'));
-  set('模型', model, 'model.model_path');
+  const modelPath = get('model.model_path');
+  const detectedTypes = [...new Set([...clean.matchAll(/^[ \t]*Detected DiT model type:\s*(\w+)\./gm)].map(match => match[1]))];
+  const dit = get('data.data_type') === 'diffusion' || detectedTypes.length > 0;
+  const mainDumps = dit ? modelConfigs.filter(entry => detectedTypes.length === 1
+    ? entry.config.model_type === detectedTypes[0] || entry.configClass === detectedTypes[0] + 'Config'
+    : /DiTModelConfig$/.test(entry.configClass || '')) : modelConfigs;
+  if (detectedTypes.length > 1) issues.push('DiT 主干模型类型存在冲突，层数需核对');
+  let model = leaf(modelPath), modelSource = 'model.model_path';
+  if (/^(?:transformer(?:_\d+)?|unet|dit|model)$/i.test(model)) {
+    const names = typeof modelPath === 'string' ? modelPath.split('/').filter(name =>
+      /^(?:Qwen|DeepSeek|Llama|Gemma|GLM|Mistral|MiniCPM|MiniMax|Wan|LTX)[-_.]?[a-z0-9]/i.test(name)) : [];
+    if (names.length) { model = names.at(-1); modelSource += '（模型目录，忽略组件子目录）'; }
+    else { model = ''; issues.push('model.model_path 指向组件子目录，无法确认模型名称，请手动填写'); }
+  }
+  set('模型', model, modelSource);
   set('参数', model.match(/(?:^|-)(\d+(?:\.\d+)?[BM])(?:-|$)/i)?.[1], '模型名称中的参数标识');
-  set('系列', model.match(/^(Qwen|DeepSeek|Llama|Gemma|GLM|Mistral|MiniCPM)/i)?.[1], '模型名称中的系列标识');
+  set('系列', model.match(/^(Qwen|DeepSeek|Llama|Gemma|GLM|Mistral|MiniCPM|MiniMax|Wan|LTX)/i)?.[1], '模型名称中的系列标识');
   const seq = get('data.max_seq_len');
-  if (positive(seq)) set('序列', seq % 1024 === 0 ? `${seq / 1024}k` : String(seq), 'data.max_seq_len');
+  if (dit) notes.push('DiT 序列取决于实际 latent / patch 形状；data.max_seq_len 不作为视频/音频序列长度，未记录实际长度时留空');
+  if (!dit && positive(seq)) set('序列', seq % 1024 === 0 ? `${seq / 1024}k` : String(seq), 'data.max_seq_len');
   const world = runtime(/^[ \t]*Process rank:\s*\d+,\s*world size:\s*(\d+)/gm, 'world size');
   if (world) set('集群规格', `${world}P`, 'Process rank / world size 运行日志');
   const acc = 'model.accelerator.';
@@ -85,11 +99,13 @@ export function extractVeOmniConfig(text) {
       checkpoint + 'enable / recompute_layers / selective_recompute_layers');
   }
   const known = modelDefaults(model).source;
+  if (dit && !mainDumps.length) issues.push('未找到可确认的 DiT 主干 Model config，层数不从条件模型推断');
   for (const [column, key, totalKey] of [[LAYERS, 'num_hidden_layers', 'layers'], [EXPERTS, 'num_experts', 'experts']]) {
-    // Text backbone only: do not pick vision_config.num_hidden_layers or experts_per_tok.
-    const textDumps = modelConfigs.filter(entry => Object.hasOwn(entry.config, 'text_config'));
-    const path = textDumps.length ? `text_config.${key}` : key;
-    const count = pick(textDumps.length ? textDumps : modelConfigs, path);
+    // DiT and condition encoders are separate models. Never borrow the
+    // condition encoder's depth, token-refiner depth or vision tower depth.
+    const textDumps = mainDumps.filter(entry => Object.hasOwn(entry.config, 'text_config'));
+    const path = dit && column === LAYERS ? 'num_layers' : textDumps.length ? `text_config.${key}` : key;
+    const count = dit && detectedTypes.length > 1 ? undefined : pick(textDumps.length ? textDumps : mainDumps, path);
     if (positive(count)) {
       const total = known?.[totalKey];
       set(column, total && total !== count ? `${count}/${total}` : count, `Model config ${path}`);

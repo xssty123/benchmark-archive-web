@@ -102,7 +102,7 @@ step:2 - perf/throughput:120 - perf/time_per_step:160 - timing_s/update_actor:55
 
 ### SFT：VeOmni 原始日志
 
-可以直接选择 VeOmni 的 `.log` / `.txt`，不需要先转换成 JSONL。支持启动时打印的 `model / data / train` 配置、运行时设备规模和梯度累积记录，以及 HF `Model config` 中的文本主干层数和专家数。字段按完整路径独立提取，异常或重复字段只影响对应结果，提示包含字段路径和原日志行号
+可以直接选择 VeOmni 的 `.log` / `.txt`，不需要先转换成 JSONL。支持启动时打印的 `model / data / train` 配置、运行时设备规模和梯度累积记录，以及 HF `Model config` 中的文本主干层数和专家数、DiT 主干的 `num_layers`（不混用条件模型层数）。字段按完整路径独立提取，异常或重复字段只影响对应结果，提示包含字段路径和原日志行号
 
 没有逐步性能数据的日志仍可进入核对页：配置照常填写，吞吐、MFU 和步耗时留空，统计范围隐藏，允许复制整行、保存到历史记录和再次编辑。备注仍仅保留用户输入
 
