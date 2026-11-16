@@ -139,6 +139,8 @@ function prepareConfigLog(text) {
       else if (c === '}' && depth) depth--;
     }
     if (!depth) owner = '';
+    // pprint/JSON strings cannot contain an unescaped physical newline.
+    quote = ''; escaped = false;
     return body;
   }).join(' ')).join('\n');
   return { clean, ignored: [...ignored] };
@@ -158,7 +160,8 @@ function* dictionaryBlocks(text) {
       continue;
     }
     if (quote) {
-      if (escaped) escaped = false;
+      if (c === '\n' || c === '\r') { quote = ''; escaped = false; }
+      else if (escaped) escaped = false;
       else if (c === '\\') escaped = true;
       else if (c === quote) quote = '';
     } else if (c === '"' || c === "'") quote = c;
@@ -178,6 +181,123 @@ function sameConfig(a, b) {
   return keys.length === Object.keys(b).length && keys.every(key => Object.hasOwn(b, key) && sameConfig(a[key], b[key]));
 }
 
+// Walk each dictionary entry independently. A bad value is never a reason to
+// abandon later entries; only structural boundaries, not keyword order, matter.
+function readConfigFields(text) {
+  let i = 0;
+  const issues = [], rootKeys = new Set();
+  const ws = () => { while (i < text.length && /\s/.test(text[i])) i++; };
+  const issue = (path, position, reason) => issues.push({ path: path.join('.') || '配置', position, reason });
+  function quoted(start) {
+    const quote = text[start]; let escaped = false;
+    for (let p = start + 1; p < text.length; p++) {
+      const c = text[p];
+      if (c === '\n' || c === '\r') return { end: p, closed: false };
+      if (escaped) escaped = false;
+      else if (c === '\\') escaped = true;
+      else if (c === quote) return { end: p + 1, closed: true };
+    }
+    return { end: text.length, closed: false };
+  }
+  function keyAt(start) {
+    if (text[start] !== '"' && text[start] !== "'") return null;
+    const q = quoted(start); if (!q.closed) return null;
+    let p = q.end;
+    while (p < text.length && /\s/.test(text[p])) p++;
+    if (text[p] !== ':') return null;
+    try { return { key: readLiteral(text.slice(start, q.end)).value, end: p + 1 }; }
+    catch { return null; }
+  }
+  const columnAt = p => p - text.lastIndexOf('\n', p - 1) - 1;
+  // Locate this value's delimiter without interpreting Python expressions.
+  // Quoted strings and nested lists/calls hide their internal commas and keys.
+  function valueBoundary(start, column, recover) {
+    const stack = []; let bad = '';
+    for (let p = start; p < text.length; p++) {
+      const c = text[p];
+      if (c === '\n' || c === '\r') {
+        let next = p + 1; while (next < text.length && /\s/.test(text[next])) next++;
+        if (recover && (stack.length || bad) && keyAt(next) && columnAt(next) <= column) {
+          return { end: next, reason: bad || '值的括号未闭合' };
+        }
+      }
+      if (c === '"' || c === "'") {
+        if (!stack.length && p > start && keyAt(p)) return { end: p, reason: bad, missingComma: true };
+        const q = quoted(p);
+        if (!q.closed) { bad = '字符串未闭合'; p = q.end - 1; }
+        else p = q.end - 1;
+      } else if ('[{('.includes(c)) stack.push(({ '[': ']', '{': '}', '(': ')' })[c]);
+      else if (']})'.includes(c)) {
+        if (!stack.length || stack.at(-1) !== c) return { end: p, reason: bad || (stack.length ? '值的括号不匹配' : '') };
+        stack.pop();
+      } else if (c === ',' && !stack.length) return { end: p, reason: bad };
+    }
+    return { end: text.length, reason: bad || (stack.length ? '值的括号未闭合' : '') };
+  }
+  function boundary(start, column, allowRecovery = true) {
+    const stop = valueBoundary(start, column, false);
+    // Indentation is only a recovery hint for a broken value, never a rule for
+    // valid nested values whose formatting may use any amount of whitespace.
+    return stop.reason && allowRecovery ? valueBoundary(start, column, true) : stop;
+  }
+  function object(path, depth) {
+    const out = Object.create(null), seen = new Set();
+    i++; // opening brace
+    while (i < text.length) {
+      ws(); if (i >= text.length) break;
+      if (text[i] === '}') { i++; return out; }
+      if (text[i] === ',') { i++; continue; }
+      const start = i, entry = keyAt(i);
+      if (!entry) {
+        issue(path, i, '包含暂不支持的数据类型或日志前缀，无法确认字段归属');
+        // Skip the whole unknown fragment, including any nested data. Never
+        // promote keys from an unrecognized wrapper into the current object.
+        const end = boundary(i, columnAt(i), false).end;
+        i = Math.max(i + 1, end);
+        continue;
+      }
+      if (!path.length) rootKeys.add(entry.key);
+      i = entry.end; ws();
+      const valueStart = i, fieldPath = [...path, entry.key];
+      let value, valid = false;
+      if (text[i] === '{' && depth < 100) {
+        value = object(fieldPath, depth + 1); valid = true;
+        ws();
+        if (i < text.length && ![',', '}'].includes(text[i]) && !keyAt(i)) {
+          const stop = boundary(i, columnAt(start));
+          issue(fieldPath, valueStart, '字典后包含不支持的表达式');
+          i = stop.end; valid = false;
+        }
+      } else {
+        const stop = boundary(i, columnAt(start));
+        const raw = text.slice(i, stop.end).trim();
+        i = stop.end;
+        try {
+          if (stop.reason) throw new Error(stop.reason);
+          const parsed = readLiteral(raw);
+          if (parsed.end !== raw.length) throw new Error('值包含不支持的表达式');
+          value = parsed.value; valid = true;
+        } catch (error) {
+          const reasons = { 'Unsupported literal': '包含暂不支持的数据类型或表达式', 'Invalid escape': '字符串转义无效',
+            'Unclosed string': '字符串未闭合', 'Incomplete literal': '值缺失或未闭合', 'Config too deep': '嵌套层级超过支持范围',
+            'Invalid separator': '值包含不支持的表达式', 'Invalid dict': '值的字典格式无效' };
+          issue(fieldPath, valueStart, reasons[error.message] || error.message);
+        }
+      }
+      if (seen.has(entry.key)) {
+        delete out[entry.key];
+        issue(fieldPath, start, '包含重复字段，该字段留空');
+      } else if (valid) out[entry.key] = value;
+      seen.add(entry.key);
+      ws();
+      if (keyAt(i)) issue(fieldPath, i, '字段间缺少逗号，已按明确的键值边界继续识别');
+    }
+    issue(path, i, '配置未闭合或输出中断');
+    return out;
+  }
+  return { config: object([], 0), issues, rootKeys };
+}
+
 export function extractConfig(text) {
   const { clean, ignored } = prepareConfigLog(text), configs = [], problems = [];
   const lineAt = position => clean.slice(0, position).split('\n').length;
@@ -185,40 +305,37 @@ export function extractConfig(text) {
   for (const block of dictionaryBlocks(clean)) {
     if (!/['"]actor_rollout_ref['"]\s*:/.test(block.text)) continue;
     const where = `第 ${lineAt(block.start)} 行开始的配置`;
-    try {
-      const c = readLiteral(block.text).value;
-      if (!c || !Object.hasOwn(c, 'actor_rollout_ref')) {
-        problems.push(`${where}的 actor_rollout_ref 不在配置顶层，暂不支持该包装格式`);
-      } else if (!c.actor_rollout_ref || typeof c.actor_rollout_ref !== 'object' || Array.isArray(c.actor_rollout_ref) ||
-                 !c.trainer || typeof c.trainer !== 'object' || Array.isArray(c.trainer)) {
-        problems.push(`${where}缺少有效的 actor_rollout_ref 或 trainer 配置对象`);
-      } else configs.push({ config: c, line: lineAt(block.start) });
-    } catch (error) {
-      const line = lineAt(block.start + (error.position || 0));
-      const reasons = { 'Unsupported literal': '包含暂不支持的数据类型或日志前缀', 'Duplicate config key': '包含重复字段',
-        'Invalid separator': '分隔符格式不支持，可能夹杂日志前缀或其他输出', 'Invalid dict': '字典键值格式不支持',
-        'Invalid escape': '字符串转义格式不支持', 'Config too deep': '嵌套层级超过支持范围',
-        'Incomplete literal': '配置内容不完整', 'Unclosed string': '字符串未闭合' };
-      const reason = !block.complete ? '配置未闭合或输出中断，未读取到的字段保持为空' : reasons[error.message] || '格式暂不支持';
-      const problem = `${where}解析失败（第 ${line} 行）：${reason}`;
-      const partial = error.partial;
-      const recovered = partial?.actor_rollout_ref && !error.fatal ? mapConfig(partial, text) : null;
-      const useful = recovered && ['模型', '训练后端', '推理后端', '集群规格', '序列'].some(key => recovered.fields[key] !== undefined);
-      if (useful) configs.push({ config: partial, line: lineAt(block.start), recovery: problem });
-      else problems.push(problem);
+    const parsed = readConfigFields(block.text), c = parsed.config;
+    const diagnostics = parsed.issues.map(item => `第 ${lineAt(block.start + item.position)} 行 ${item.path}：${item.reason}`);
+    const isObject = value => value && typeof value === 'object' && !Array.isArray(value);
+    if (!parsed.rootKeys.has('actor_rollout_ref')) {
+      problems.push(`${where}的 actor_rollout_ref 不在配置顶层或无法确认所属层级${diagnostics.length ? '；' + diagnostics.slice(0, 3).join('；') : ''}`);
+      continue;
     }
+    for (const key of ['actor_rollout_ref', 'trainer']) {
+      if (!isObject(c[key])) {
+        diagnostics.push(`${where}缺少有效的 ${key} 配置对象，仅相关字段留空`);
+        delete c[key];
+      }
+    }
+    configs.push({ config: c, line: lineAt(block.start), endLine: lineAt(block.start + block.text.length), diagnostics });
   }
   if (problems.length) return empty(problems.slice(0, 3).join('；') + '。配置字段未自动填入，请核对或手动填写');
   if (!configs.length) {
     if (/\bactor_rollout_ref(?:['"]?\s*:|\.)/.test(clean)) return empty('发现 actor_rollout_ref 配置线索，但未找到完整的字典配置块；YAML、启动参数或被截取的配置片段暂不支持，请提供完整配置打印或手动填写');
     return empty('未找到运行配置：日志中没有识别到包含 actor_rollout_ref 和 trainer 的配置块，请确认日志包含启动时的完整配置打印，或手动填写');
   }
-  if ((configs.length > 1 && configs.some(c => c.recovery)) || configs.some(c => !sameConfig(c.config, configs[0].config))) {
+  if ((configs.length > 1 && configs.some(c => c.diagnostics.length)) || configs.some(c => !sameConfig(c.config, configs[0].config))) {
     return empty(`发现多份不同运行配置（起始行 ${configs.map(c => c.line).join('、')}），配置字段未自动填入，请先拆分日志`);
   }
   const result = mapConfig(configs[0].config, text);
-  if (configs[0].recovery) result.warning = configs[0].recovery + '。仅恢复已完整解析的字段，其余请手动核对';
-  if (ignored.length) result.notes.push(`已排除配置中交错的警告或 INFO 输出（原日志行 ${ignored.slice(0, 12).join('、')}${ignored.length > 12 ? '等' : ''}）`);
+  const diagnostics = configs[0].diagnostics;
+  if (diagnostics.length) {
+    result.warning = diagnostics.slice(0, 3).join('；') + (diagnostics.length > 3 ? `；另有 ${diagnostics.length - 3} 项，见解析说明` : '') + '。已独立提取其余字段，请核对提示项';
+    result.notes.push(...diagnostics);
+  }
+  const configIgnored = ignored.filter(line => configs.some(c => line >= c.line && line <= c.endLine));
+  if (configIgnored.length) result.notes.push(`已排除配置中交错的警告或 INFO 输出（原日志行 ${configIgnored.slice(0, 12).join('、')}${configIgnored.length > 12 ? '等' : ''}）`);
   if (!result.fields['模型']) result.notes.push('已解析配置，但 actor_rollout_ref.model.path 缺失或不是有效字符串，模型名称需手动填写');
   return result;
 }

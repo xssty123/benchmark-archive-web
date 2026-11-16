@@ -56,7 +56,7 @@ git diff --check
 也可以使用 `npm test` 和 `npm run test:python`，无需 `npm install`
 
 - `core.test.mjs`：日志解析、配置提取、统计范围、字段展示、复制列顺序、CSV 和 ZIP
-- `config.test.mjs`：配置字段顺序、日志前缀、等价配置去重、同一行粘连及交错日志、部分字段恢复、跨 worker 隔离、失败行号和原因；只使用合成样例
+- `config.test.mjs`：配置字段顺序、日志前缀、等价配置去重、同一行粘连及交错日志、逐字段独立提取（损坏位置前后的字段均保留）、重复字段局部失效、跨 worker 隔离、失败行号和原因；只使用合成样例
 - `flow.test.mjs`：换日志清理、异步读取失效、返回核对保留修改、顶部指标卡片同步；使用最小 DOM 适配器，不代替真实浏览器测试
 - `test_collect_environment.py`：使用临时 Git 仓库和模拟命令验证环境采集，不扫描真实训练环境
 

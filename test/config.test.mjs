@@ -54,12 +54,12 @@ test('missing, YAML, truncated, malformed and missing-trainer configs have disti
     ['+ python train.py actor_rollout_ref.model.path=example', /YAML、启动参数/],
     ["{'actor_rollout_ref': {'model': {'path': 'unfinished", /第 1 行.*未闭合/],
     ["{'actor_rollout_ref': {'model': Path('example')}, 'trainer': {}}", /第 1 行.*暂不支持的数据类型/],
-    [JSON.stringify({ actor_rollout_ref: actor }), /缺少有效的.*trainer/],
     ["{'actor_rollout_ref': {}, 'trainer': {}, 'trainer': {}}", /重复字段/],
   ];
   for (const [text, warning] of cases) {
     const result = extractConfig(text);
-    assert.deepEqual(result.fields, {});
+    assert.equal(result.fields['模型'], undefined);
+    assert.equal(result.fields['训练后端'], undefined);
     assert.match(result.warning, warning);
   }
 });
@@ -69,7 +69,7 @@ test('different configs and incomplete additional dumps never silently choose on
   assert.match(result.warning, /多份不同运行配置.*起始行/);
   assert.deepEqual(result.fields, {});
   const partial = extractConfig(dump + "\n{'actor_rollout_ref': {");
-  assert.match(partial.warning, /未闭合/); assert.deepEqual(partial.fields, {});
+  assert.match(partial.warning, /多份不同运行配置/); assert.deepEqual(partial.fields, {});
 });
 
 test('config errors do not prevent throughput parsing and do not enter remarks', () => {
@@ -126,7 +126,7 @@ test('interrupted config retains only complete actor fields without inventing tr
   assert.equal(result.fields['训练后端'], 'VeOmni');
   assert.equal(result.fields['集群规格'], undefined);
   assert.equal(result.fields['同步/异步'], undefined);
-  assert.match(result.warning, /未闭合.*仅恢复已完整解析/);
+  assert.match(result.warning, /未闭合.*已独立提取其余字段/);
 });
 
 test('unknown values preserve earlier verified fields but not partial expressions or lists', () => {
@@ -134,7 +134,7 @@ test('unknown values preserve earlier verified fields but not partial expression
   const result = extractConfig(text);
   assert.equal(result.fields['模型'], 'Qwen-Fixture-27B');
   assert.equal(result.fields['集群规格'], undefined);
-  assert.match(result.warning, /仅恢复已完整解析/);
+  assert.match(result.warning, /已独立提取其余字段/);
   try {
     readLiteral("{'safe': 7, 'bad': [1, unsupported()], 'later': 9}");
     assert.fail('must reject unsupported value');
@@ -145,9 +145,10 @@ test('unknown values preserve earlier verified fields but not partial expression
   }
 });
 
-test('duplicate keys and multiple runs still fail instead of selecting a partial result', () => {
+test('duplicate keys invalidate only that field while multiple runs stay separate', () => {
   const duplicate = startTrainer + "'nnodes': 2, 'nnodes': 3, 'n_gpus_per_node': 8}}";
-  assert.deepEqual(extractConfig(duplicate).fields, {});
+  assert.equal(extractConfig(duplicate).fields['集群规格'], undefined);
+  assert.equal(extractConfig(duplicate).fields['模型'], 'Qwen-Fixture-27B');
   assert.match(extractConfig(duplicate).warning, /重复字段/);
   const mixed = dump + '\n' + startTrainer;
   assert.deepEqual(extractConfig(mixed).fields, {});
@@ -159,7 +160,7 @@ test('literal-looking output from another Ray worker cannot supply trainer field
   const result = extractConfig(text);
   assert.equal(result.fields['模型'], 'Qwen-Fixture-27B');
   assert.equal(result.fields['集群规格'], undefined);
-  assert.match(result.warning, /仅恢复已完整解析/);
+  assert.match(result.warning, /已独立提取其余字段/);
 });
 
 test('logger-like strings inside quoted config values are not removed', () => {
@@ -174,4 +175,105 @@ test('warning-like text inside a config string remains data', () => {
   assert.equal(result.warning, '');
   assert.equal(result.fields['模型'], 'Qwen-Fixture-27B');
   assert.equal(result.notes.some(note => note.includes('交错')), false);
+});
+
+
+test('invalid fields at the start, middle and end do not gate independent fields', () => {
+  const failures = ['unsupported()', "Path('/tmp/fixture')", '[1, unknown()]', '2 + unknown()', "'bad\\xZZ'", "Factory({'model': {'path': '/models/Fake-99B'}, 'strategy': 'fsdp'})"];
+  for (const bad of failures) {
+    for (const position of ['first', 'middle', 'last']) {
+      const entries = ["'trainer': " + JSON.stringify(trainer), "'actor_rollout_ref': " + JSON.stringify(actor), "'data': " + JSON.stringify(config.data)];
+      entries.splice({ first: 0, middle: 1, last: 3 }[position], 0, "'unrelated': " + bad);
+      const result = extractConfig('{' + entries.join(', ') + '}');
+      assert.equal(result.fields['模型'], 'Qwen-Fixture-27B', `${position}: ${bad}`);
+      assert.equal(result.fields['集群规格'], '16P');
+      assert.equal(result.fields['训练后端'], 'VeOmni');
+      assert.equal(result.fields['序列'], '1k→8k');
+      assert.match(result.warning, /unrelated/);
+    }
+  }
+});
+
+test('a bad actor leaf does not suppress later actor, model, rollout or trainer fields', () => {
+  const text = "{'actor_rollout_ref': {'actor': {'ppo_mini_batch_size': unknown(), 'strategy': 'veomni', 'ppo_micro_batch_size_per_gpu': 3}, " +
+    "'model': {'path': '/models/Qwen-Fixture-27B'}, 'rollout': {'name': 'vllm', 'tensor_model_parallel_size': 4}}, " +
+    "'critic': {'strategy': 'megatron', 'ppo_mini_batch_size': 999}, 'trainer': {'nnodes': 2, 'n_gpus_per_node': 8}}";
+  const result = extractConfig(text);
+  assert.equal(result.fields['模型'], 'Qwen-Fixture-27B');
+  assert.equal(result.fields['训练后端'], 'VeOmni');
+  assert.equal(result.fields['推理后端'], 'vLLM');
+  assert.equal(result.fields['推理并行策略'], 'TP4');
+  assert.equal(result.fields['集群规格'], '16P');
+  assert.match(result.warning, /actor_rollout_ref.actor.ppo_mini_batch_size/);
+  assert.match(result.fields['mbs/gbs/gas（gas=梯度累积）'], /MBS=3；GBS=未记录/);
+});
+
+test('malformed strings, missing commas and broken list values resume at clear sibling keys', () => {
+  for (const broken of ["'bad': 'unfinished\n", "'bad': [unknown(1),\n", "'bad': unknown() "]) {
+    const text = "{'actor_rollout_ref': {'actor': {\n" + broken + "'strategy': 'veomni'}, 'model': {'path': '/models/Qwen-Fixture-27B'}}, " +
+      "'trainer': {'nnodes': 2, 'n_gpus_per_node': 8}}";
+    const result = extractConfig(text);
+    assert.equal(result.fields['模型'], 'Qwen-Fixture-27B', broken);
+    assert.equal(result.fields['训练后端'], 'VeOmni', broken);
+    assert.equal(result.fields['集群规格'], '16P', broken);
+    assert.match(result.warning, /actor_rollout_ref.actor.bad/);
+  }
+});
+
+test('missing or invalid trainer does not suppress available actor fields', () => {
+  for (const trainerPart of ['', ", 'trainer': unknown()", ", 'trainer': null"]) {
+    const result = extractConfig("{'actor_rollout_ref': " + JSON.stringify(actor) + trainerPart + '}');
+    assert.equal(result.fields['模型'], 'Qwen-Fixture-27B');
+    assert.equal(result.fields['训练后端'], 'VeOmni');
+    assert.equal(result.fields['集群规格'], undefined);
+    assert.match(result.warning, /trainer/);
+  }
+});
+
+test('duplicates never borrow actor values from critic or an earlier duplicate', () => {
+  const text = "{'trainer': {'nnodes': 1, 'n_gpus_per_node': 8}, 'actor_rollout_ref': {" +
+    "'actor': {'strategy': 'veomni', 'strategy': 'megatron', 'strategy': 'fsdp2'}, " +
+    "'model': {'path': '/models/Qwen-Fixture-27B'}, 'rollout': {'name': 'vllm'}}, 'critic': {'strategy': 'fsdp'}}";
+  const result = extractConfig(text);
+  assert.equal(result.fields['模型'], 'Qwen-Fixture-27B');
+  assert.equal(result.fields['训练后端'], undefined);
+  assert.equal(result.fields['推理后端'], 'vLLM');
+  assert.equal(result.fields['集群规格'], '8P');
+  assert.match(result.warning, /actor_rollout_ref.actor.strategy.*重复字段/);
+});
+
+test('valid adjacent strings, tuples and quoted key-looking values do not create fields', () => {
+  const text = "{'trainer': {'nnodes': 2, 'n_gpus_per_node': 8}, 'actor_rollout_ref': {" +
+    "'actor': {'bad': unsupported(), 'strategy': 'veomni', 'extra': (1, 'strategy', {'strategy': 'fsdp'})}, " +
+    "'model': {'path': '/models/' 'Qwen-Fixture-27B', 'description': \"'strategy': 'fsdp'\"}}}";
+  const result = extractConfig(text);
+  assert.equal(result.fields['模型'], 'Qwen-Fixture-27B');
+  assert.equal(result.fields['训练后端'], 'VeOmni');
+  assert.equal(result.fields['集群规格'], '16P');
+});
+
+
+test('invalid actor container does not suppress independent trainer and data fields', () => {
+  const result = extractConfig("{'actor_rollout_ref': unknown(), 'trainer': " + JSON.stringify(trainer) + ", 'data': " + JSON.stringify(config.data) + '}');
+  assert.equal(result.fields['模型'], undefined);
+  assert.equal(result.fields['训练后端'], undefined);
+  assert.equal(result.fields['集群规格'], '16P');
+  assert.equal(result.fields['序列'], '1k→8k');
+  assert.match(result.warning, /actor_rollout_ref/);
+});
+
+test('unknown wrappers cannot contribute nested actor fields after a newline', () => {
+  const text = "{'actor_rollout_ref': {'actor': {unknown_wrapper({'strategy': 'fsdp',\n 'ppo_mini_batch_size': 999}), 'strategy': 'veomni'}, " +
+    "'model': {'path': '/models/Qwen-Fixture-27B'}}, 'trainer': {'nnodes': 2, 'n_gpus_per_node': 8}}";
+  const result = extractConfig(text);
+  assert.equal(result.fields['训练后端'], 'VeOmni');
+  assert.equal(result.fields['模型'], 'Qwen-Fixture-27B');
+  assert.equal(result.fields['集群规格'], '16P');
+  assert.doesNotMatch(result.fields['mbs/gbs/gas（gas=梯度累积）'], /999/);
+});
+
+
+test('warnings outside the matched config are not reported as config recovery', () => {
+  const text = dump + "\nother {\nINFO: unrelated progress\n}\n" + metrics;
+  assert.equal(extractConfig(text).notes.some(note => note.includes('交错')), false);
 });
