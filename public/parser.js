@@ -23,7 +23,7 @@ function addStep(rows, step, values, line) {
   rows.set(step, previous);
 }
 
-function summarize(rows, fields, unsupportedMFU = false, estimatedStepTime = false) {
+function summarize(rows, fields, unsupportedMFU = false, { estimatedStepTime = false, independentMetrics = false } = {}) {
   if (!rows.size) throw new Error('未找到支持的逐步训练指标，请检查任务类型与日志格式');
   const steps = [...rows.keys()].sort((a, b) => a - b);
   const metrics = {};
@@ -36,10 +36,12 @@ function summarize(rows, fields, unsupportedMFU = false, estimatedStepTime = fal
         (label === '单步耗时s' && value === 0) || (label.includes('MFU') && value > 1)) invalid.push(step);
       else values.push(value);
     }
-    const reason = estimatedStepTime && key === 'step_time_s' && values.length && !invalid.length ? '' :
+    const allowMissing = independentMetrics && values.length > 0 && !invalid.length && !(label.includes('MFU') && unsupportedMFU);
+    const reason = allowMissing && missing.length ? `该指标未记录 ${missing.length} 步，仅平均实际记录的 ${values.length} 步` :
+      estimatedStepTime && key === 'step_time_s' && values.length && !invalid.length ? '' :
       label.includes('MFU') && unsupportedMFU ? '日志声明 MFU 不受支持' :
       missing.length || invalid.length ? `缺失 ${missing.length} 步 / 无效 ${invalid.length} 步` : '';
-    metrics[label] = { key, mean: reason ? null : values.reduce((a, b) => a + b / values.length, 0),
+    metrics[label] = { key, mean: reason && !allowMissing ? null : values.reduce((a, b) => a + b / values.length, 0),
       validCount: values.length, missing, invalid, reason };
   }
   return { steps, count: steps.length, first: steps[0], last: steps.at(-1),
@@ -79,7 +81,7 @@ function parseSlimeRL(text) {
   const configuration = extractSlimeConfig(text), parsed = slimeRecords(text), rows = new Map();
   for (const record of parsed.records) addStep(rows, record.step, record.values, record.line);
   configuration.notes.push(...parsed.notes);
-  const metadata = { adapter: 'slime-text-v1', unit: 'tokens/s（训练阶段，全局）', configuration };
+  const metadata = { adapter: 'slime-text-v1', unit: 'tokens/s（训练阶段，全局）', configuration, independentMetrics: true };
   if (rows.size) return withRecords(rows, SLIME_FIELDS, false, metadata);
   const reason = '未找到受支持的 slime perf 指标，缺失字段留空';
   configuration.notes.push('未识别到 perf <rollout_id>: {...} 中可填写的性能字段；仅有 TFLOPS、生成吞吐或无步号 Timer 输出时不推算主表指标');
@@ -163,7 +165,7 @@ function parseNormalizedSFT(text) {
 }
 
 function withRecords(rows, fields, unsupportedMFU, metadata) {
-  const all = summarize(rows, fields, unsupportedMFU, metadata.estimatedStepTime);
+  const all = summarize(rows, fields, unsupportedMFU, metadata);
   return { ...all, ...metadata, records: [...rows], fields, unsupportedMFU,
     totalCount: all.count, totalFirst: all.first, totalLast: all.last,
     range: { start: all.first, end: all.last } };
@@ -176,7 +178,7 @@ export function selectRange(parsed, start = parsed.totalFirst, end = parsed.tota
   }
   const rows = new Map(parsed.records.filter(([step]) => step >= start && step <= end));
   if (!rows.size) throw new Error('所选范围没有已记录训练步');
-  const selected = summarize(rows, parsed.fields, parsed.unsupportedMFU, parsed.estimatedStepTime);
+  const selected = summarize(rows, parsed.fields, parsed.unsupportedMFU, parsed);
   return { ...parsed, ...selected, gaps: end - start + 1 - selected.count, range: { start, end } };
 }
 

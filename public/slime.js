@@ -171,7 +171,8 @@ export function slimeRecords(text) {
     if (Object.keys(values).length) records.push({ step: Number(marker[1]), values, line });
     for (const issue of parsed.issues) notes.push(`第 ${line} 行指标 ${issue.path}：${issue.reason}`);
   }
-  notes.push('统计单位为日志 perf 后的 rollout_id（保留从 0 开始的编号）；同一编号的训练、rollout 指标合并，默认全部编号取算术平均',
+  notes.push('统计单位为日志 perf 后的 rollout_id（保留从 0 开始的编号）；同一编号的训练、rollout 指标合并，默认包含全部已记录编号',
+    '各指标分别对所选范围内实际记录到的步数取算术平均。某编号只有 rollout 或只有训练记录时，不清空其他编号已有的指标，也不补 0；每项指标显示自己的有效步数。完全未记录的指标留空；存在无效值的指标仍留空并提示，不将无效值作为缺失跳过',
     'TPS 采用 perf/actor_train_tok_per_s：整个 rollout batch 的 token 数 / actor_train_time，属于训练阶段全局 tokens/s，不是 verl 的端到端单设备吞吐；不混用生成阶段 tokens_per_gpu_per_sec',
     '单步耗时采用 perf/step_time（train_wait_time + train_time），按 slime 计时范围记录，不把可重叠的阶段耗时相加',
     'resharding 采用 perf/update_weights_time 的已记录计时值；Timer 在 perf 输出时重置，权重同步可能属于前一轮更新，不自动移动步号',

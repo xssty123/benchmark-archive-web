@@ -102,7 +102,7 @@ step:2 - perf/throughput:120 - perf/time_per_step:160 - timing_s/update_actor:55
 
 ### RL：slime 原始日志
 
-选择 RL 后自动识别 slime 的 `perf <rollout_id>: {...}`，同一编号的训练和 rollout 指标合并，默认全部步数，也可调整范围。配置支持 Megatron 参数表、Namespace 和顶层参数字典，每个字段独立识别；只有配置而没有性能时也能核对、复制和保存
+选择 RL 后自动识别 slime 的 `perf <rollout_id>: {...}`，同一编号的训练和 rollout 指标合并，默认全部步数，也可调整范围。各指标按实际记录到的步数分别求均值并显示有效步数，训练与 rollout 覆盖不同不会清空已有结果，完全未记录的指标留空。配置支持 Megatron 参数表、Namespace 和顶层参数字典，每个字段独立识别；只有配置而没有性能时也能核对、复制和保存
 
 TPS 使用已打印的 `perf/actor_train_tok_per_s`（训练阶段全局 tokens/s），不混用生成阶段吞吐。训练、rollout、权重更新及单步耗时按各自明确字段填写；MFU 缺失留空，不从 TFLOPS 推算。来源及跨框架口径差异放在解析说明，备注只保留用户输入
 

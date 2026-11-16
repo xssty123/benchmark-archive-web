@@ -178,7 +178,7 @@ async function editRecord(record) {
 }
 function renderRangeStatus(p) {
   $('.range-panel').hidden = p.totalCount === 0;
-  $('#coverage').textContent = p.totalCount === 0 ? '已识别日志配置，未找到可用性能数据；性能字段留空，可核对、复制和保存配置' : `日志共 ${p.totalCount} 步（${p.totalFirst}–${p.totalLast}） · 当前统计 ${p.count} 步（${p.range.start}–${p.range.end}），逐步算术平均` +
+  $('#coverage').textContent = p.totalCount === 0 ? '已识别日志配置，未找到可用性能数据；性能字段留空，可核对、复制和保存配置' : `日志共 ${p.totalCount} 步（${p.totalFirst}–${p.totalLast}） · 当前统计 ${p.count} 步（${p.range.start}–${p.range.end}），${p.independentMetrics ? '各指标按实际记录步数取算术平均' : '逐步算术平均'}` +
     (p.gaps ? ` · 所选范围有 ${p.gaps} 个步号未记录` : '');
   for (const [id, value] of [['range-start', p.range.start], ['range-end', p.range.end]]) {
     const input = $('#' + id); input.min = p.totalFirst; input.max = p.totalLast; input.value = value ?? ''; input.disabled = p.totalCount === 0;

@@ -98,7 +98,8 @@ test('perf dictionaries can be multiline and same records deduplicate; conflicti
   const p = parseRL(line + line); assert.equal(p.count, 1); assert.equal(p.metrics['吞吐TPS'].mean, 1000);
   assert.throws(() => parseRL(line + perf(0, { ...train, 'perf/actor_train_time': 30 })), /冲突/);
   const bad = parseRL(dotted() + perf(0, train) + perf(1, { 'perf/step_time': 60 }));
-  assert.equal(bad.metrics['吞吐TPS'].mean, null); assert.deepEqual(bad.metrics['吞吐TPS'].missing, [1]);
+  assert.equal(bad.metrics['吞吐TPS'].mean, 1000); assert.deepEqual(bad.metrics['吞吐TPS'].missing, [1]);
+  assert.match(bad.metrics['吞吐TPS'].reason, /仅平均实际记录的 1 步/);
 });
 
 test('step time uses explicit step_time or the framework wait+train definition, never rollout sums', () => {
@@ -141,4 +142,38 @@ test('verl routing stays separate and mixed framework logs fail rather than sile
   assert.equal(parseRL('step:1 - perf/throughput:123').adapter, 'verl-text-v1');
   assert.throws(() => parseRL(dotted() + 'step:1 - perf/throughput:123'), /slime 和 verl/);
   assert.throws(() => parseSFT(dotted()), /JSONL/);
+});
+
+test('slime training and rollout metrics average their own recorded steps when coverage differs', () => {
+  const text = dotted() + perf(4, train) + perf(5, { ...train, 'perf/actor_train_tok_per_s': 2000 }) +
+    perf(5, rollout) + perf(7, { ...rollout, 'perf/rollout_time': 45 });
+  const p = parseRL(text);
+  assert.deepEqual(p.steps, [4, 5, 7]); assert.equal(p.independentMetrics, true);
+  assert.equal(p.metrics['吞吐TPS'].mean, 1500); assert.equal(p.metrics['吞吐TPS'].validCount, 2);
+  assert.equal(p.metrics['训练耗时 actor_update'].mean, 20);
+  assert.equal(p.metrics['resharding耗时'].mean, 3); assert.equal(p.metrics['单步耗时s'].mean, 65);
+  assert.equal(p.metrics['推理耗时'].mean, 40); assert.equal(p.metrics['推理耗时'].validCount, 2);
+  assert.equal(p.metrics['训练MFU'].mean, null);
+  assert.deepEqual(p.metrics['吞吐TPS'].missing, [7]); assert.deepEqual(p.metrics['推理耗时'].missing, [4]);
+  assert.match(p.metrics['吞吐TPS'].reason, /未记录 1 步.*实际记录的 2 步/);
+  assert.equal(p.configuration.fields['备注'], undefined);
+  assert.match(p.configuration.notes.join('\n'), /各指标分别.*实际记录/);
+  const restored = JSON.parse(JSON.stringify(p));
+  const onlyRollout = selectRange(restored, 7, 7);
+  assert.equal(onlyRollout.metrics['吞吐TPS'].mean, null);
+  assert.equal(onlyRollout.metrics['推理耗时'].mean, 45);
+  const onlyTrain = selectRange(restored, 4, 4);
+  assert.equal(onlyTrain.metrics['吞吐TPS'].mean, 1000);
+  assert.equal(onlyTrain.metrics['推理耗时'].mean, null);
+  assert.equal(selectRange(onlyRollout).metrics['吞吐TPS'].mean, 1500);
+});
+
+test('invalid slime values still block only that metric; missing values never become zero', () => {
+  const p = parseRL(dotted() + perf(0, train) + perf(1, { ...train, 'perf/actor_train_time': 'invalid' }) + perf(2, rollout));
+  assert.equal(p.metrics['吞吐TPS'].mean, 1000); assert.equal(p.metrics['训练耗时 actor_update'].mean, null);
+  assert.deepEqual(p.metrics['训练耗时 actor_update'].invalid, [1]);
+  assert.match(p.metrics['训练耗时 actor_update'].reason, /无效 1 步/);
+  assert.equal(p.metrics['推理耗时'].mean, 35);
+  const verl = parseRL('step:0 - perf/throughput:100\nstep:1 - perf/time_per_step:10');
+  assert.equal(verl.metrics['吞吐TPS'].mean, null);
 });
