@@ -123,7 +123,7 @@ export function extractVeOmniConfig(text) {
 }
 
 // Native field names from VeOmni EnvironMeter. Only explicitly step-labelled
-// metric records are usable; tqdm speed and cumulative token counts are not.
+// metric records are handled here; progress time estimates are a separate fallback.
 export function veomniMetricRecords(text) {
   const clean = prepareConfigLog(text).clean, records = [], notes = [];
   for (const block of dictionaryBlocks(clean)) {

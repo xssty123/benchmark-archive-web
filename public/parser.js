@@ -22,7 +22,7 @@ function addStep(rows, step, values, line) {
   rows.set(step, previous);
 }
 
-function summarize(rows, fields, unsupportedMFU = false) {
+function summarize(rows, fields, unsupportedMFU = false, estimatedStepTime = false) {
   if (!rows.size) throw new Error('未找到支持的逐步训练指标，请检查任务类型与日志格式');
   const steps = [...rows.keys()].sort((a, b) => a - b);
   const metrics = {};
@@ -35,7 +35,8 @@ function summarize(rows, fields, unsupportedMFU = false) {
         (label === '单步耗时s' && value === 0) || (label.includes('MFU') && value > 1)) invalid.push(step);
       else values.push(value);
     }
-    const reason = label.includes('MFU') && unsupportedMFU ? '日志声明 MFU 不受支持' :
+    const reason = estimatedStepTime && key === 'step_time_s' && values.length && !invalid.length ? '' :
+      label.includes('MFU') && unsupportedMFU ? '日志声明 MFU 不受支持' :
       missing.length || invalid.length ? `缺失 ${missing.length} 步 / 无效 ${invalid.length} 步` : '';
     metrics[label] = { key, mean: reason ? null : values.reduce((a, b) => a + b / values.length, 0),
       validCount: values.length, missing, invalid, reason };
@@ -82,8 +83,16 @@ function parseVeOmniSFT(text) {
   for (const record of parsed.records) addStep(rows, record.step, record.values, record.line);
   configuration.notes.push(...parsed.notes,
     'VeOmni 吞吐使用 tokens_per_second(M) × 1,000,000，单位为全局 tokens/s；MFU 原始值为比例，页面显示百分比',
-    '仅采用带明确步号的指标字典；进度条 s/it、it/s 是速率估计，默认经过平滑，不作为逐步实测耗时，也不由此推算 TPS 或 MFU。单步耗时仅采用明确记录的 step_time_s');
-  const metadata = { unit: 'tokens/s', adapter: 'veomni-text-v1', configuration };
+    'TPS、MFU 仅采用带明确步号的指标字典，缺失时留空，不从进度条推算；单步耗时优先采用显式 step_time_s');
+  let estimatedStepTime = false;
+  if (![...rows.values()].some(row => Object.hasOwn(row.values, 'step_time_s'))) {
+    const progress = veomniProgressTimes(text);
+    configuration.notes.push(...progress.notes);
+    for (const record of progress.records) addStep(rows, record.step, { step_time_s: record.seconds }, record.line);
+    estimatedStepTime = progress.records.length > 0;
+    if (estimatedStepTime) configuration.notes.push('单步耗时为估算：取所选范围内进度条已打印的有效 s/it 的算术平均；该速率默认经过平滑，并非逐步实测耗时。相同步数重复刷新只取最后一个有效值；没有 s/it 的步骤不参与耗时均值，不补 0。多 epoch 步号按 (epoch−1)×每 epoch 总步数+当前步展开');
+  }
+  const metadata = { unit: 'tokens/s', adapter: 'veomni-text-v1', configuration, estimatedStepTime };
   if (rows.size) return withRecords(rows, SFT_FIELDS, /Returning zero FLOPs|MFU will always be zero/i.test(text), metadata);
   const reason = '日志未记录可用的逐步性能数据';
   configuration.notes.push('本地核对的 VeOmni 默认终端日志不打印完整效率指标，W&B 中的指标不会自动出现在终端日志里');
@@ -92,6 +101,28 @@ function parseVeOmniSFT(text) {
     range: { start: null, end: null },
     metrics: Object.fromEntries(Object.entries(SFT_FIELDS).map(([key, source]) => [key,
       { key: source, mean: null, validCount: 0, missing: [], invalid: [], reason }])) };
+}
+
+function veomniProgressTimes(text) {
+  const samples = new Map(), notes = [];
+  let total, epochs;
+  // Match training Epoch bars only, not validation/loading bars or loss postfix numbers.
+  const pattern = /\bEpoch\s+(\d+)\s*\/\s*(\d+)\s*:[^\r\n]*?\|\s*(\d+)\s*\/\s*(\d+)\s*\[[^\]\r\n]*?,\s*(\d+(?:\.\d+)?(?:e[+-]?\d+)?)\s*s\/it(?=\s*[,\]])/gi;
+  const lines = text.replace(ANSI, '').split(/\r\n|\r|\n/);
+  for (const [index, line] of lines.entries()) {
+    for (const match of line.matchAll(pattern)) {
+      const [epoch, epochCount, current, size, seconds] = match.slice(1).map(Number);
+      const step = (epoch - 1) * size + current;
+      if (![epoch, epochCount, current, size, step].every(Number.isSafeInteger) || epoch < 1 || epoch > epochCount ||
+        current < 1 || current > size || !Number.isFinite(seconds) || seconds <= 0) continue;
+      if ((total !== undefined && total !== size) || (epochs !== undefined && epochs !== epochCount)) {
+        return { records: [], notes: ['进度条的 epoch 总数或每 epoch 总步数不一致，无法统一步号，未估算单步耗时'] };
+      }
+      total = size; epochs = epochCount;
+      samples.set(step, { step, seconds, line: index + 1 });
+    }
+  }
+  return { records: [...samples.values()], notes };
 }
 
 function parseNormalizedSFT(text) {
@@ -113,7 +144,7 @@ function parseNormalizedSFT(text) {
 }
 
 function withRecords(rows, fields, unsupportedMFU, metadata) {
-  const all = summarize(rows, fields, unsupportedMFU);
+  const all = summarize(rows, fields, unsupportedMFU, metadata.estimatedStepTime);
   return { ...all, ...metadata, records: [...rows], fields, unsupportedMFU,
     totalCount: all.count, totalFirst: all.first, totalLast: all.last,
     range: { start: all.first, end: all.last } };
@@ -126,7 +157,7 @@ export function selectRange(parsed, start = parsed.totalFirst, end = parsed.tota
   }
   const rows = new Map(parsed.records.filter(([step]) => step >= start && step <= end));
   if (!rows.size) throw new Error('所选范围没有已记录训练步');
-  const selected = summarize(rows, parsed.fields, parsed.unsupportedMFU);
+  const selected = summarize(rows, parsed.fields, parsed.unsupportedMFU, parsed.estimatedStepTime);
   return { ...parsed, ...selected, gaps: end - start + 1 - selected.count, range: { start, end } };
 }
 

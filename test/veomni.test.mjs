@@ -18,7 +18,7 @@ const log = prefix + JSON.stringify(config, null, 2) + runtime + modelDump;
 const metric = (step, values) => '\n' + prefix + JSON.stringify({ global_step: step, ...values });
 
 test('native VeOmni failure log returns configuration with empty performance and no fake steps', () => {
-  const p = parseSFT(log + '\nEpoch 1/2: 0%| | 1/306 [00:51<4:24:02, 51.94s/it, total_loss: 1.39]\n[rank0]: RuntimeError: fixture failure');
+  const p = parseSFT(log + '\n[rank0]: RuntimeError: fixture failure');
   assert.equal(p.adapter, 'veomni-text-v1');
   assert.equal(p.count, 0); assert.deepEqual(p.records, []);
   assert.deepEqual(p.range, { start: null, end: null });
@@ -100,11 +100,12 @@ test('invalid or missing metric affects only itself and all explicitly logged st
   assert.deepEqual(lossOnly.metrics['吞吐TPS'].missing, [3]);
 });
 
-test('unlabelled, cumulative, tqdm and per-module throughput are not substitutes for global metrics', () => {
+test('unlabelled, cumulative and per-module throughput are not substitutes for global metrics', () => {
   const p = parseSFT(log + '\nEpoch 1/2: 10%|xx| 10/100 [10:00<11:00, 8.22s/it, loss: 1.1]\n' +
     JSON.stringify({ 'tokens_per_second(M)': 100, mfu: 0.5 }) + metric(1, { 'consume_tokens(M)': 2, 'trace/vision/tokens_per_second(M)': 0.5 }));
-  assert.equal(p.count, 1);
-  assert.equal(p.metrics['吞吐TPS'].mean, null); assert.equal(p.metrics['单步耗时s'].mean, null);
+  assert.equal(p.count, 2);
+  assert.equal(p.metrics['吞吐TPS'].mean, null); assert.equal(p.metrics.MFU.mean, null);
+  assert.equal(p.metrics['单步耗时s'].mean, 8.22);
   assert.match(p.configuration.notes.join('\n'), /没有明确步号/);
 });
 
@@ -166,9 +167,68 @@ test('generic unknown component paths stay blank while ordinary model names are 
   }
 });
 
-test('successful tqdm progress without explicit metrics keeps performance blank and explains why', () => {
+test('tqdm s/it averages provide estimated time while TPS, MFU and remarks remain empty', () => {
   const p = parseSFT(log + '\nEpoch 1/1: 3%| | 304/8800 [24:20<10:37:03, 4.50s/it, total_loss: 0.46, mse_video: 0.08, mse_audio: 0.38]\nEpoch 1/1: 3%| | 305/8800 [24:24<10:23:42, 4.41s/it, total_loss: 0.40, mse_video: 0.08, mse_audio: 0.32]');
-  assert.equal(p.count, 0);
-  for (const m of Object.values(p.metrics)) assert.equal(m.mean, null);
-  assert.match(p.configuration.notes.join('\n'), /平滑.*不作为逐步实测耗时/);
+  assert.equal(p.count, 2);
+  assert.equal(p.metrics['单步耗时s'].mean, 4.455);
+  assert.equal(p.metrics.MFU.mean, null); assert.equal(p.metrics['吞吐TPS'].mean, null);
+  assert.equal(p.configuration.fields['备注'], undefined);
+  assert.equal(p.estimatedStepTime, true);
+  assert.equal(selectRange(p, 305, 305).metrics['单步耗时s'].mean, 4.41);
+  assert.equal(selectRange(selectRange(p, 305, 305)).metrics['单步耗时s'].mean, 4.455);
+  assert.match(p.configuration.notes.join('\n'), /单步耗时为估算/);
+});
+
+const progress = (step, speed, epoch = 1, totalEpochs = 1, size = 100) =>
+  `Epoch ${epoch}/${totalEpochs}: 3%|▎ | ${step}/${size} [00:10<01:00, ${speed}, total_loss: 0.4]`;
+
+test('progress redraws, ANSI, CR-only output, gaps and multi-epoch counters keep one sample per step', () => {
+  const text = log + '\n' + [progress(1, '9.00s/it', 1, 2), progress(1, '8.00s/it', 1, 2),
+    progress(2, '4.00s/it', 1, 2), progress(1, '6.00s/it', 2, 2), progress(1, '6.00s/it', 2, 2)]
+    .map(line => '\x1b[36m[rank0]: ' + line + '\x1b[0m').join('\r');
+  const p = parseSFT(text);
+  assert.deepEqual(p.steps, [1, 2, 101]);
+  assert.equal(p.metrics['单步耗时s'].mean, 6);
+  assert.equal(selectRange(p, 1, 2).metrics['单步耗时s'].mean, 6);
+  assert.equal(selectRange(p, 2, 101).metrics['单步耗时s'].mean, 5);
+  assert.equal(p.metrics['单步耗时s'].validCount, 3);
+});
+
+test('invalid speeds, initial bars, it/s and validation/loading bars are not estimated', () => {
+  const bars = ['?s/it', 'NaNs/it', 'infs/it', '0.00s/it', '-2.00s/it', '2.00it/s'];
+  const text = log + '\n' + [...bars.map(speed => progress(1, speed)), progress(0, '5.00s/it'),
+    'Validation: 3%| | 1/100 [00:10<01:00, 5.00s/it]', 'Loading: 1/100 5.00s/it'].join('\n');
+  const p = parseSFT(text);
+  assert.equal(p.count, 0); assert.equal(p.metrics['单步耗时s'].mean, null);
+  const valid = parseSFT(text + '\n' + progress(2, '4.00s/it'));
+  assert.equal(valid.count, 1); assert.equal(valid.metrics['单步耗时s'].mean, 4);
+});
+
+test('explicit step time takes precedence across the log without mixing estimates into missing steps', () => {
+  const p = parseSFT(log + metric(1, { step_time_s: 20 }) + metric(2, { step_time_s: 10 }) +
+    '\n' + progress(1, '4.00s/it') + '\n' + progress(2, '6.00s/it'));
+  assert.equal(p.estimatedStepTime, false); assert.equal(p.metrics['单步耗时s'].mean, 15);
+  assert.doesNotMatch(p.configuration.notes.join('\n'), /单步耗时为估算/);
+  const partial = parseSFT(log + metric(1, { step_time_s: 20 }) + metric(2, { mfu: 0.2 }) + '\n' + progress(2, '6.00s/it'));
+  assert.equal(partial.metrics['单步耗时s'].mean, null);
+  assert.deepEqual(partial.metrics['单步耗时s'].missing, [2]);
+});
+
+test('estimated time coexists with recorded TPS and MFU and survives saved JSON analysis', () => {
+  const p = parseSFT(log + metric(1, { 'tokens_per_second(M)': 0.01, mfu: 0.2 }) +
+    metric(2, { 'tokens_per_second(M)': 0.03, mfu: 0.4 }) + '\n' + progress(1, '4.00s/it') + '\n' + progress(2, '6.00s/it'));
+  assert.equal(p.metrics['吞吐TPS'].mean, 20000);
+  assert.ok(Math.abs(p.metrics.MFU.mean - 0.3) < 1e-10);
+  const restored = selectRange(JSON.parse(JSON.stringify(p)), 2, 2);
+  assert.equal(restored.metrics['单步耗时s'].mean, 6);
+  assert.equal(restored.estimatedStepTime, true);
+  assert.match(restored.configuration.notes.join('\n'), /估算/);
+  assert.equal(restored.configuration.fields['备注'], undefined);
+});
+
+test('inconsistent epoch totals disable only the time estimate and explain why', () => {
+  const p = parseSFT(log + metric(1, { mfu: 0.2 }) + '\n' + progress(1, '4.00s/it') + '\n' + progress(2, '6.00s/it', 1, 1, 200));
+  assert.equal(p.metrics.MFU.mean, 0.2); assert.equal(p.metrics['单步耗时s'].mean, null);
+  assert.equal(p.configuration.fields['模型'], 'Qwen3.5-35B-A3B');
+  assert.match(p.configuration.notes.join('\n'), /不一致.*未估算/);
 });
