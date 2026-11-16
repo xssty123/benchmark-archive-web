@@ -15,12 +15,14 @@ function fixture() {
       replaceChildren() { this.cleared = true; }, addEventListener(event, fn) { this[event] = fn; } });
     return elements.get(key);
   };
+  const links = ['环境信息', '日志存档', 'profiling采集'].map(key => ({ dataset: { material: key }, value: '',
+    setCustomValidity(text) { this.error = text; }, reportValidity() { this.reported = true; return !this.error; } }));
   const state = { revision: 0, task: 'RL', log: null, parsed: null, analyzedLog: null };
-  const context = vm.createContext({ state, $, parseLog, safely: (_, fn) => fn(), message() {},
+  const context = vm.createContext({ state, $, URL, $$: selector => selector.includes('data-material') ? links : [], parseLog, safely: (_, fn) => fn(), message() {},
     renderFiles() {}, renderReview() { context.renderCount++; }, stage(n) { context.currentStage = n; }, renderCount: 0 });
   vm.runInContext(section('function invalidateAnalysis()', 'function reset()') + '\n' +
     section("$('#analyze').addEventListener", "$('#back-upload').addEventListener"), context);
-  return { state, $, context, choose: log => context.chooseLog(log), analyze: () => $('#analyze').click({ currentTarget: $('#analyze') }) };
+  return { state, $, links, context, choose: log => context.chooseLog(log), analyze: () => $('#analyze').click({ currentTarget: $('#analyze') }) };
 }
 const file = text => ({ size: text.length, text: async () => text });
 test('replacing a log invalidates previous results, draft and saved-record association', async () => {
@@ -72,7 +74,7 @@ test('MFU percent inputs normalize to ratios and reject values above 100 for bot
   for (const key of ['训练MFU', 'MFU']) {
     const f = fixture();
     const inputs = [{ dataset: { column: '模型' }, value: 'Demo' }, { dataset: { column: key }, value: '13' }];
-    f.context.$$ = () => inputs;
+    f.context.$$ = selector => selector.includes('data-material') ? f.links : inputs;
     f.context.schema = { RL: ['环境信息', '日志存档', 'profiling采集'] };
     f.state.parsed = { metrics: { [key]: { mean: 0.13 } } };
     vm.runInContext(section('function currentRow()', 'function currentPreviewRow()') + '\n' +
@@ -85,4 +87,36 @@ test('MFU percent inputs normalize to ratios and reject values above 100 for bot
     inputs[1].value = '101'; assert.throws(() => f.context.validateCurrentRow(), /0–100/);
     inputs[1].value = ''; assert.equal(f.context.currentRow()[key], '');
   }
+});
+
+test('material links entered before the first log survive returning to review, but clear on replacement', async () => {
+  const f = fixture();
+  f.links[0].value = 'https://example.com/environment.txt';
+  f.links[1].value = 'https://example.com/run.log';
+  f.choose(file('step:1 - perf/throughput:131'));
+  await f.analyze();
+  vm.runInContext(section('function currentRow()', 'function currentPreviewRow()'), f.context);
+  assert.equal(f.context.currentRow()['环境信息'], f.links[0].value);
+  assert.equal(f.context.currentRow()['日志存档'], f.links[1].value);
+  f.state.parsed = { ...f.state.parsed, range: { start: 1, end: 1 } };
+  await f.analyze();
+  assert.equal(f.context.currentRow()['环境信息'], 'https://example.com/environment.txt');
+  f.links[0].value = 'https://example.com/new.txt';
+  assert.equal(f.context.currentRow()['环境信息'], 'https://example.com/new.txt');
+  f.choose(file('step:1 - perf/throughput:222'));
+  assert.ok(f.links.every(input => input.value === ''));
+});
+
+test('invalid material links return to their first-page field and prevent analysis', async () => {
+  const f = fixture(); f.choose(file('step:1 - perf/throughput:131'));
+  for (const value of ['http://example.com', 'not a url', 'javascript:alert(1)', 'https:example.com']) {
+    f.links[0].value = value;
+    await f.analyze();
+    assert.equal(f.state.parsed, null);
+    assert.equal(f.context.currentStage, 1);
+    assert.equal(f.links[0].reported, true);
+    assert.match(f.links[0].error, /HTTPS/);
+  }
+  f.links[0].value = ''; await f.analyze();
+  assert.equal(f.state.parsed.count, 1);
 });

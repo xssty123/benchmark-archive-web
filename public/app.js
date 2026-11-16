@@ -63,12 +63,41 @@ function invalidateAnalysis() {
 }
 function chooseLog(log) {
   if (log === state.log) return;
+  if (state.log) clearMaterialLinks();
   invalidateAnalysis();
   state.log = log; state.demo = false;
   renderFiles(); message('');
 }
+function readMaterialLinks() {
+  return Object.fromEntries($$('#material-links [data-material]').map(input => [input.dataset.material, input.value.trim()]));
+}
+function clearMaterialLinks() {
+  $$('#material-links [data-material]').forEach(input => { input.value = ''; input.setCustomValidity(''); });
+}
+function validateMaterialLinks() {
+  for (const input of $$('#material-links [data-material]')) {
+    const value = input.value.trim();
+    let valid = !value;
+    if (value) {
+      try { valid = /^https:\/\//i.test(value) && new URL(value).protocol === 'https:'; } catch { valid = false; }
+    }
+    input.setCustomValidity(valid ? '' : '请填写有效的 HTTPS 链接，或留空');
+    if (!valid) {
+      stage(1);
+      input.reportValidity();
+      return false;
+    }
+  }
+  return true;
+}
+$('#material-links').addEventListener('submit', event => event.preventDefault());
+$('#material-links').addEventListener('input', event => {
+  event.target.setCustomValidity('');
+  if (state.parsed) renderRowPreview();
+});
 function reset() {
   invalidateAnalysis();
+  clearMaterialLinks();
   Object.assign(state, { log: null, demo: false });
   $$('.file-input').forEach(input => { input.value = ''; });
   state.initial = null; state.defaultModel = null;
@@ -124,14 +153,12 @@ function renderReview(preserved = {}) {
     `已从运行配置提取 ${Object.keys(p.configuration.fields).length} 项；默认满血，已知模型填入官方总层数和总专家数，请按实际运行核对` : '默认满血；未识别到的模型层数和专家数需填写，减层时改为实际数/总数');
   const metricKeys = Object.keys(p.metrics);
   const otherKeys = schema[state.task].filter(key => !metricKeys.includes(key) && !schema[state.task].slice(-3).includes(key));
-  const groups = [['性能指标', metricKeys], ['模型与运行配置', otherKeys], ['在线材料链接', schema[state.task].slice(-3)]];
+  const groups = [['性能指标', metricKeys], ['模型与运行配置', otherKeys]];
   let html = '<div class="form-grid">';
   for (const [title, keys] of groups) {
-    if (title === '在线材料链接') html += `<section class="row-preview" aria-label="单行结果预览"><div class="row-preview-heading"><div><h3>单行结果</h3><p>与当前参数同步 · 按 ${state.task} 表头顺序 · 复制不含表头，可直接粘贴到 Excel / 在线表格</p></div><button type="button" class="button secondary" id="copy-row">复制整行</button></div><div id="row-preview-table" class="row-preview-scroll"></div><p id="copy-status" role="status" class="footnote"></p><textarea id="copy-fallback" class="hidden" readonly aria-label="手动复制整行内容"></textarea></section>`;
-    html += `<h3 class="form-heading">${title}${title === '在线材料链接' ? '（可选）' : ''}</h3>`;
-    if (title === '在线材料链接') html += '<p class="material-link-hint">材料请自行归档到团队云空间，链接会随整行复制；也可留空，直接在在线表格补充</p>';
+    html += `<h3 class="form-heading">${title}</h3>`;
     for (const key of keys) {
-      const index = schema[state.task].indexOf(key), metric = p.metrics[key], link = index >= schema[state.task].length - 3;
+      const index = schema[state.task].indexOf(key), metric = p.metrics[key];
       const source = p.configuration?.evidence?.[key];
       if (key === BATCH) {
         const parts = parseBatch(initial[key]);
@@ -139,15 +166,14 @@ function renderReview(preserved = {}) {
         continue;
       }
       const dimensions = [LAYERS, EXPERTS].includes(key);
-      const fieldHint = key === COMPLETENESS ? '默认满血，可改为减层；减层时填写实际数/总数' : dimensions ?
-        defaults.source ? `满血默认总数 · ${defaults.source.scope} · 专家数指每层路由专家总数` : '待填写总数；减层时填写实际数/总数' : '';
-      html += `<div class="form-field"><label for="field-${index}">${escape(key)}${key.includes('MFU') ? '（%）' : ''}${key === '模型' ? ' *' : ''}</label><input id="field-${index}" data-column="${escape(key)}" value="${escape(initial[key])}" ${link ? 'type="url" placeholder="可留空，或粘贴云空间 HTTPS 链接"' : metric ? `type="number" min="0" step="any"${key.includes('MFU') ? ' max="100"' : ''}` : 'type="text" placeholder="未提供，留空"'} ${key === '模型' ? 'required' : ''}>${metric ? `<small>${escape(metric.key)} · ${metric.validCount}/${p.count} 步${metric.reason ? ' · ' + escape(metric.reason) : ''}</small>` : source ? `<small>来源：${escape(source)}</small>` : ''}</div>`;
+      const fieldHint = ({ 'A5/A3（无基线不填写）': '填可比运行的吞吐比，无基线留空', 'resharding耗时': '采用 update_weights 阶段总耗时', '备注': '仅保存你填写的内容' })[key] || (key === COMPLETENESS ? '默认满血，可改为减层；减层时填写实际数/总数' : dimensions ?
+        defaults.source ? `满血默认总数 · ${defaults.source.scope} · 专家数指每层路由专家总数` : '待填写总数；减层时填写实际数/总数' : '');
+      html += `<div class="form-field"><label for="field-${index}">${escape(key)}${key.includes('MFU') ? '（%）' : ''}${key === '模型' ? ' *' : ''}</label><input id="field-${index}" data-column="${escape(key)}" value="${escape(initial[key])}" ${metric ? `type="number" min="0" step="any"${key.includes('MFU') ? ' max="100"' : ''}` : 'type="text" placeholder="未提供，留空"'} ${key === '模型' ? 'required' : ''}>${metric ? `<small>${escape(metric.key)} · ${metric.validCount}/${p.count} 步${metric.reason ? ' · ' + escape(metric.reason) : ''}</small>` : source ? `<small>来源：${escape(source)}</small>` : ''}</div>`;
       if (fieldHint) html = html.slice(0, -6) + `<small>${escape(fieldHint)}${dimensions && defaults.source ? ` · <a href="${defaults.source.url}" target="_blank" rel="noopener noreferrer">模型配置 ↗</a>` : ''}</small></div>`;
     }
   }
-  $('#record-form').innerHTML = html + '</div><p class="footnote">A5/A3 填可比运行的吞吐比，无基线留空' +
-    (state.task === 'RL' ? ' · resharding 当前采用 update_weights 阶段总耗时' : '') +
-    ' · 备注仅保留你填写的内容</p>';
+  html += `<section class="row-preview" aria-label="单行结果预览"><div class="row-preview-heading"><div><h3>单行结果</h3><p>与当前参数同步 · 按 ${state.task} 表头顺序 · 复制不含表头，可直接粘贴到 Excel / 在线表格</p></div><button type="button" class="button secondary" id="copy-row">复制整行</button></div><div id="row-preview-table" class="row-preview-scroll"></div><p id="copy-status" role="status" class="footnote"></p><textarea id="copy-fallback" class="hidden" readonly aria-label="手动复制整行内容"></textarea></section>`;
+  $('#record-form').innerHTML = html + '</div>';
   renderRowPreview();
   $('#copy-row').addEventListener('click', event => safely(event.currentTarget, copyCurrentRow));
 }
@@ -189,6 +215,7 @@ function renderMetricCards(row) {
 }
 function currentRow() {
   const row = Object.fromEntries($$('#record-form [data-column]').map(input => [input.dataset.column, input.dataset.column === '备注' ? input.value : input.value.trim()]));
+  Object.assign(row, readMaterialLinks());
   // Inputs use percent units; stored records and parsed metrics retain ratios.
   for (const key of ['训练MFU', 'MFU']) {
     if (row[key] !== undefined && row[key] !== '') row[key] = Number(row[key]) / 100;
@@ -245,6 +272,7 @@ $('#range-reset').addEventListener('click', event => safely(event.currentTarget,
 $('#analyze').addEventListener('click', event => safely(event.currentTarget, async () => {
   if (!state.log) throw new Error('请先添加运行日志，或试用演示数据');
   if (state.log.size > 50 * 1024 ** 2) throw new Error('日志超过 50 MB，请使用完整的单次运行日志片段或后续服务端版本');
+  if (!validateMaterialLinks()) return;
   if (state.parsed && state.analyzedLog === state.log) { stage(2); return; }
   const log = state.log, task = state.task, revision = state.revision;
   const text = await log.text();
@@ -267,12 +295,10 @@ function validateCurrentRow() {
       throw new Error(`${key}无效：耗时应大于零，MFU 使用 0–100 百分比数值（例如 13 表示 13%）`);
     }
   }
-  for (const key of schema[state.task].slice(-3)) {
-    if (row[key] && new URL(row[key]).protocol !== 'https:') throw new Error(`${key}须使用 HTTPS 链接；也可留空后在在线表格补充`);
-  }
 }
 
 function prepareCurrentRow() {
+  if (!validateMaterialLinks()) return false;
   if (!state.parsed || state.analyzedLog !== state.log) throw new Error('日志已更换，请先解析当前日志');
   if (!$('#range-start').value || !$('#range-end').value || Number($('#range-start').value) !== state.parsed.range.start || Number($('#range-end').value) !== state.parsed.range.end) applyRange();
   if (!$('#record-form').reportValidity()) return false;
