@@ -1,0 +1,13 @@
+node_modules/
+.DS_Store
+*.log
+*.zip
+private-data/
+coverage/
+.env
+.env.*
+environment.txt
+profiling/
+__pycache__/
+*.pyc
+_site/

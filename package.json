@@ -1,0 +1,15 @@
+{
+  "name": "benchmark-archive",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "RL / SFT benchmark records in the browser",
+  "scripts": {
+    "start": "node server.mjs",
+    "test": "node --test test/*.test.mjs",
+    "test:python": "python3 -B -m unittest discover -s test -p test_collect_environment.py"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
