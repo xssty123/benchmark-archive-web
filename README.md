@@ -142,3 +142,5 @@ server.mjs         本地静态服务器
 ```
 
 切换任务、更换日志、试用演示或点击“解析新日志”时，如当前内容尚未保存，会先确认是否放弃。刷新或关闭页面时也会由浏览器提示；已保存且未修改的历史记录不重复提示
+
+环境采集脚本只查询 `ASCEND_HOME_PATH`、`ASCEND_TOOLKIT_HOME`、`ASCEND_OPP_PATH` 指向的同一套 CANN；冲突或无效时明确提示，未指定时不扫描默认目录。`--cann-root` 可显式覆盖选择，详见[环境采集说明](docs/environment-commands.md)

@@ -25,19 +25,16 @@ uv pip list --python "$(command -v python)"
 
 ## 2. CANN 版本
 
-CANN 新版（按实际安装位置选择）：
+一键脚本只采集当前训练环境指定的一套 CANN，读取 `ASCEND_HOME_PATH`、`ASCEND_TOOLKIT_HOME` 和 `ASCEND_OPP_PATH`，不再扫描系统默认目录、用户目录或额外的 driver / NNAL 安装
 
-```bash
-bash /usr/local/Ascend/cann/query_pkg_version.sh
-```
+- 同一安装的软链接别名、`aarch64-linux` / `x86_64-linux` 架构目录和 `opp` 路径会归一化后去重
+- 多个变量指向不同安装时，报告列出来源和路径并提示冲突，不查询任何一套 CANN
+- 未设置这些变量时报告“未检测到”；路径不存在时报告无效，不回退到其他安装
+- `--cann-root` 显式指定一套安装，覆盖环境变量选择；重复指定的路径必须归属于同一套安装
+- 只执行所选安装内的 `query_pkg_version.sh`，并保留安装信息中的 `version`、`innerversion` 等原始字段
+- `--cann-info` 仅补充所选安装内的版本文件，外部文件或跨安装的符号链接会跳过并说明原因
 
-旧版 Toolkit 常见路径：
-
-```bash
-cat /usr/local/Ascend/ascend-toolkit/latest/$(uname -m)-linux/ascend_toolkit_install.info
-```
-
-一键脚本也会检查 ASCEND_HOME_PATH、ASCEND_TOOLKIT_HOME、ASCEND_OPP_PATH 和用户目录下的 Ascend 安装，并记录匹配文件的真实路径；多套安装会分别输出，不自动认定某一套是历史运行版本
+这里记录的是采集时环境指定的安装，不代表已检查历史训练进程实际加载的动态库。CANN 未检测到或冲突时仍继续采集 PTA、源码和包列表，问题会写入报告
 
 ## 3. 源码 commit
 
@@ -76,8 +73,8 @@ python /path/to/collect_environment.py --mode uv --root "$PWD" --output environm
 
 - `--python /path/to/python`：明确指定训练解释器，pip、uv 和 PTA 版本查询均使用该解释器
 - `--repo /other/source`：只采集指定仓库，可重复；相对路径以 `--root` 为基准，提供此参数后关闭自动发现
-- `--cann-root /custom/Ascend/cann`：补充 CANN 安装目录，可重复
-- `--cann-info /path/to/version.info`：补充版本文件，可重复
+- `--cann-root /custom/Ascend/cann`：显式选择 CANN 安装，覆盖环境变量；不追加扫描其他安装
+- `--cann-info /selected/cann/custom/version.info`：补充所选 CANN 安装内的版本文件，可重复；不能用来另选一套安装
 
 只检查根目录及直属子目录，不递归、不跟随目录符号链接。普通目录没有 `.git` 标记就跳过；任何名称的直属 Git 仓库都可被识别。更深层、外部或符号链接指向的仓库可用 `--repo` 明确选择。扫描错误、命令超时、缺少工具等都会写入报告，不当成已采集成功
 
