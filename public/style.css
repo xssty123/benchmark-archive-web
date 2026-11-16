@@ -21,3 +21,5 @@
 #discard-dialog{max-width:420px;width:calc(100% - 48px);padding:28px;border:1px solid var(--border);border-radius:12px;color:#24322f}#discard-dialog::backdrop{background:#172e2466}#discard-dialog p{margin:18px 0 24px}#discard-dialog .review-actions{justify-content:flex-end}
 
 #config-status.config-warning{padding:12px 14px;border:1px solid #eeddb8;background:#fff7e8;border-radius:7px;color:#805b24;font-size:12px;white-space:pre-line}
+
+.range-panel[hidden]{display:none}

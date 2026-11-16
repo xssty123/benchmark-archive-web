@@ -224,3 +224,32 @@ test('draft dialog only permits leaving after explicit discard', async () => {
   const discard = f.context.confirmLeave(); dialog.returnValue = 'discard'; dialog.close();
   assert.equal(await discard, true);
 });
+
+test('config-only VeOmni results can be reviewed, copied and saved without a step range', async () => {
+  const f = fixture(); f.state.task = 'SFT';
+  await f.choose(file('VeOmni\n{"model":{"model_path":"/models/Fixture-7B"},"data":{"max_seq_len":2048},"train":{}}'));
+  await f.analyze();
+  assert.equal(f.context.currentStage, 2); assert.equal(f.state.parsed.totalCount, 0);
+  vm.runInContext(section('function renderRangeStatus(', 'function renderReview('), f.context);
+  f.context.renderRangeStatus(f.state.parsed);
+  assert.equal(f.$('.range-panel').hidden, true); assert.equal(f.$('#range-start').disabled, true);
+  assert.equal(f.$('#range-start').value, ''); assert.match(f.$('#coverage').textContent, /性能字段留空/);
+  assert.equal(f.context.rangePending(), false);
+  f.$('#record-form').reportValidity = () => true;
+  f.context.validateCurrentRow = () => {};
+  vm.runInContext(section('function prepareCurrentRow()', 'function currentFingerprint()'), f.context);
+  assert.equal(f.context.prepareCurrentRow(), true);
+  const row = { 模型: 'Fixture-7B', MFU: '', 吞吐TPS: '', 单步耗时s: '', 备注: '' };
+  let captured, reset = false;
+  Object.assign(f.context, { currentRow: () => row, date: () => '2026-11-16', crypto: { randomUUID: () => 'fixture' },
+    updateSaveStatus() {}, refreshRecords: async () => {}, saveRecord: async record => { captured = record; },
+    reset: () => { reset = true; }, showRecords: async () => {} });
+  f.state.initial = { MFU: '', 吞吐TPS: '', 单步耗时s: '' };
+  vm.runInContext(section("$('#save-history').addEventListener", 'function download('), f.context);
+  await f.$('#save-history').click({ currentTarget: f.$('#save-history') });
+  assert.equal(captured.task, 'SFT'); assert.equal(captured.analysis.count, 0);
+  assert.equal(captured.row.MFU, ''); assert.equal(captured.row['吞吐TPS'], ''); assert.equal(reset, true);
+  const normal = parseLog('SFT', '{"task":"SFT","step":1,"tps_unit":"tokens/s","tps":100}');
+  f.context.renderRangeStatus(normal);
+  assert.equal(f.$('.range-panel').hidden, false); assert.equal(f.$('#range-start').disabled, false);
+});

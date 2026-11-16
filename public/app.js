@@ -48,7 +48,7 @@ function selectTask(task) {
   });
   $('#parser-hint').textContent = task === 'RL' ?
     'RL 支持 verl 的逐步文本日志，保留日志原有吞吐口径' :
-    'SFT 仅支持标准化 JSONL，暂不支持直接解析 VeOmni 等训练框架的原始日志';
+    'SFT 支持 VeOmni 原始日志及标准化 JSONL；配置逐字段识别，未记录的性能数据留空';
   $('#parser-hint').classList.toggle('support-notice', task === 'SFT');
 }
 function renderFiles() {
@@ -98,7 +98,7 @@ $('#material-links').addEventListener('input', event => {
   if (state.parsed) renderRowPreview();
 });
 function rangePending() {
-  return !!state.parsed && (!$('#range-start').value || !$('#range-end').value ||
+  return !!state.parsed && state.parsed.totalCount !== 0 && (!$('#range-start').value || !$('#range-end').value ||
     Number($('#range-start').value) !== state.parsed.range.start || Number($('#range-end').value) !== state.parsed.range.end);
 }
 function hasUnsavedChanges() {
@@ -176,14 +176,18 @@ async function editRecord(record) {
   state.savedRecord = { id: record.id, createdAt: record.createdAt, fingerprint: currentFingerprint() };
   updateSaveStatus(); renderFiles(); stage(2);
 }
+function renderRangeStatus(p) {
+  $('.range-panel').hidden = p.totalCount === 0;
+  $('#coverage').textContent = p.totalCount === 0 ? '已识别 VeOmni 日志配置，未找到带明确步号的性能数据；性能字段留空，可核对、复制和保存配置' : `日志共 ${p.totalCount} 步（${p.totalFirst}–${p.totalLast}） · 当前统计 ${p.count} 步（${p.range.start}–${p.range.end}），逐步算术平均` +
+    (p.gaps ? ` · 所选范围有 ${p.gaps} 个步号未记录` : '');
+  for (const [id, value] of [['range-start', p.range.start], ['range-end', p.range.end]]) {
+    const input = $('#' + id); input.min = p.totalFirst; input.max = p.totalLast; input.value = value ?? ''; input.disabled = p.totalCount === 0;
+  }
+}
 function renderReview(preserved = {}) {
   const p = state.parsed;
   $('#review-title').textContent = `${state.task} · ${state.editingRecord ? '编辑历史记录' : '核对性能结果'}${state.demo ? '（演示）' : ''}`;
-  $('#coverage').textContent = `日志共 ${p.totalCount} 步（${p.totalFirst}–${p.totalLast}） · 当前统计 ${p.count} 步（${p.range.start}–${p.range.end}），逐步算术平均` +
-    (p.gaps ? ` · 所选范围有 ${p.gaps} 个步号未记录` : '');
-  for (const [id, value] of [['range-start', p.range.start], ['range-end', p.range.end]]) {
-    const input = $('#' + id); input.min = p.totalFirst; input.max = p.totalLast; input.value = value;
-  }
+  renderRangeStatus(p);
   const initial = Object.fromEntries(schema[state.task].map(key => [key, '']));
   const defaultName = preserved['模型'] ?? p.configuration?.fields?.['模型'];
   const defaults = modelDefaults(defaultName, defaultName === p.configuration?.fields?.['模型'] ? p.configuration?.modelStage : undefined);

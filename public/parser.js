@@ -1,4 +1,5 @@
 import { extractConfig } from './config.js';
+import { isVeOmniLog, extractVeOmniConfig, veomniMetricRecords } from './veomni.js';
 // Explicit adapters only: do not infer task type, units or defaults from model names.
 export const RL_FIELDS = {
   '训练MFU': 'perf/mfu/actor', '吞吐TPS': 'perf/throughput',
@@ -69,12 +70,37 @@ export function parseRL(text) {
 }
 
 export function parseSFT(text) {
+  const first = text.replace(/^\uFEFF/, '').split(/\r?\n/).find(line => line.trim()) || '';
+  if (/"task"\s*:/.test(first)) return parseNormalizedSFT(text.replace(/^\uFEFF/, ''));
+  if (isVeOmniLog(text)) return parseVeOmniSFT(text);
+  return parseNormalizedSFT(text);
+}
+
+function parseVeOmniSFT(text) {
+  const configuration = extractVeOmniConfig(text), rows = new Map();
+  const parsed = veomniMetricRecords(text);
+  for (const record of parsed.records) addStep(rows, record.step, record.values, record.line);
+  configuration.notes.push(...parsed.notes,
+    'VeOmni 吞吐使用 tokens_per_second(M) × 1,000,000，单位为全局 tokens/s；MFU 原始值为比例，页面显示百分比',
+    '仅采用带明确步号的指标字典；进度条 s/it、it/s 和累计 token 数不作为逐步性能。单步耗时仅采用明确记录的 step_time_s');
+  const metadata = { unit: 'tokens/s', adapter: 'veomni-text-v1', configuration };
+  if (rows.size) return withRecords(rows, SFT_FIELDS, /Returning zero FLOPs|MFU will always be zero/i.test(text), metadata);
+  const reason = '日志未记录可用的逐步性能数据';
+  configuration.notes.push('本地核对的 VeOmni 默认终端日志不打印完整效率指标，W&B 中的指标不会自动出现在终端日志里');
+  return { ...metadata, count: 0, steps: [], first: null, last: null, gaps: 0, sources: {},
+    records: [], fields: SFT_FIELDS, unsupportedMFU: false, totalCount: 0, totalFirst: null, totalLast: null,
+    range: { start: null, end: null },
+    metrics: Object.fromEntries(Object.entries(SFT_FIELDS).map(([key, source]) => [key,
+      { key: source, mean: null, validCount: 0, missing: [], invalid: [], reason }])) };
+}
+
+function parseNormalizedSFT(text) {
   const rows = new Map();
   let unit;
   text.split(/\r?\n/).forEach((line, index) => {
     if (!line.trim()) return;
     let row;
-    try { row = JSON.parse(line); } catch { throw new Error(`第 ${index + 1} 行不是标准化 JSONL；暂不支持直接解析任意 SFT 原始日志`); }
+    try { row = JSON.parse(line); } catch { throw new Error(`第 ${index + 1} 行不是标准化 JSONL；支持 VeOmni 原始日志或标准化 SFT JSONL，未识别当前格式`); }
     if (!row || row.task !== 'SFT' || !['tokens/s', 'tokens/s/device'].includes(row.tps_unit)) {
       throw new Error(`第 ${index + 1} 行须明确 task: SFT 和 tps_unit: tokens/s 或 tokens/s/device`);
     }
@@ -94,6 +120,7 @@ function withRecords(rows, fields, unsupportedMFU, metadata) {
 }
 
 export function selectRange(parsed, start = parsed.totalFirst, end = parsed.totalLast) {
+  if (parsed.totalCount === 0) throw new Error('没有已记录性能步骤，无需选择统计范围');
   if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start > end || start < parsed.totalFirst || end > parsed.totalLast) {
     throw new Error(`统计范围须为 ${parsed.totalFirst}–${parsed.totalLast} 内的整数，开始步不能大于结束步`);
   }

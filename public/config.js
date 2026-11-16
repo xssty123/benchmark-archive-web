@@ -78,6 +78,7 @@ export function cleanConfigLog(text) {
   return text.replace(/(?:\x1b|\\x1b|\\u001b)\[[0-?]*[ -/]*[@-~]/gi, '').split(/\r\n|\n|\r/).map(line => {
     line = line.replace(/^\uFEFF/, '');
     const prefixes = [
+      /^[ \t]*\[(?:DEBUG|INFO|WARNING|WARN|ERROR|CRITICAL)\|[^\]\n]+\][ \t]*(?:(?:\d{2}\/\d{2}\/\d{4}|\d{4}-\d{2}-\d{2})[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?)[ \t]*>>[ \t]*/,
       /^[ \t]*\[(?:\d{1,3};)*\d{1,3}m/, // A pasted ANSI prefix may lose its ESC byte.
       /^[ \t]*\([^\n)]*\bpid=\d+[^)]*\)[ \t]?/,
       /^[ \t]*\[rank[ \t]*\d+\][ \t]*:?[ \t]*/i,
@@ -110,7 +111,7 @@ function raySegments(line) {
   return starts.map((start, index) => line.slice(start, starts[index + 1]));
 }
 
-function prepareConfigLog(text) {
+export function prepareConfigLog(text) {
   const ignored = new Set(); let depth = 0, quote = '', escaped = false, owner = '', warningSource = false;
   const lines = text.replace(/(?:\x1b|\\x1b|\\u001b)\[[0-?]*[ -/]*[@-~]/gi, '').split(/\r\n|\n|\r/);
   const clean = lines.map((line, lineIndex) => raySegments(line).map(segment => {
@@ -147,7 +148,7 @@ function prepareConfigLog(text) {
 }
 
 // Balanced outer dictionaries, respecting strings, in a single pass over the log.
-function* dictionaryBlocks(text) {
+export function* dictionaryBlocks(text) {
   let start = -1, depth = 0, quote = '', escaped = false;
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
@@ -183,7 +184,7 @@ function sameConfig(a, b) {
 
 // Walk each dictionary entry independently. A bad value is never a reason to
 // abandon later entries; only structural boundaries, not keyword order, matter.
-function readConfigFields(text) {
+export function readConfigFields(text) {
   let i = 0;
   const issues = [], rootKeys = new Set();
   const ws = () => { while (i < text.length && /\s/.test(text[i])) i++; };

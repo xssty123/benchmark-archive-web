@@ -100,9 +100,23 @@ step:2 - perf/throughput:120 - perf/time_per_step:160 - timing_s/update_actor:55
 - Qwen3-Omni-30B-A3B-Instruct 的 Thinker + FSDP/FSDP2 + `enable_gradient_checkpointing=true` 按标准实现归为全重计算，范围是 Thinker 文本主干全部 Transformer 层（含 Attention、MoE），不表示整个多模态系统所有算子都重算。依据：[DecoderLayer 及逐层调用](https://github.com/huggingface/transformers/blob/v4.57.1/src/transformers/models/qwen3_omni_moe/modeling_qwen3_omni_moe.py#L1351-L1561)、[完整层 checkpoint 包装](https://github.com/huggingface/transformers/blob/v4.57.1/src/transformers/modeling_layers.py#L33-L85)、[递归开启 checkpoint](https://github.com/huggingface/transformers/blob/v4.57.1/src/transformers/modeling_utils.py#L3413-L3424)。此版本用于核对标准实现，不代表已确认历史运行使用该版本；精确版本或自定义补丁需环境快照核验，分类依据保留在解析说明
 - 历史记录中的旧重计算名称在表格和 CSV 导出时统一显示，原始存档不改写；只有记录包含 Thinker 阶段及匹配的模型、后端信息时，才会将旧「开启梯度检查点」归为全重计算
 
-### SFT：标准化逐步 JSONL
+### SFT：VeOmni 原始日志
 
-当前未使用真实 SFT 日志做回归，不宣称兼容任意 VeOmni、Megatron 或其他框架原始日志。演示只验证工作流程
+可以直接选择 VeOmni 的 `.log` / `.txt`，不需要先转换成 JSONL。支持启动时打印的 `model / data / train` 配置、运行时设备规模和梯度累积记录，以及 HF `Model config` 中的文本主干层数和专家数。字段按完整路径独立提取，异常或重复字段只影响对应结果，提示包含字段路径和原日志行号
+
+没有逐步性能数据的日志仍可进入核对页：配置照常填写，吞吐、MFU 和步耗时留空，统计范围隐藏，允许复制整行、保存到历史记录和再次编辑。备注仍仅保留用户输入
+
+性能数据仅从带明确 `global_step`、`step` 或 `_step` 的指标字典提取：
+
+- `tokens_per_second(M)` 乘以 1,000,000，得到全局 `tokens/s`，不自动除以设备数
+- `mfu` 为比例，页面显示百分比；无法计算 FLOPs 时不把占位 0 当作有效 MFU
+- 单步耗时只采用明确记录的 `step_time_s`；这是可选的显式耗时字段，当前核对的 VeOmni 默认终端日志没有输出它
+- 单项指标无效或缺失不影响其他指标；默认对全部已记录指标步取逐步算术平均，也可选择范围
+- 不从进度条 `s/it`、`it/s`、累计 token 数或多模态子模块吞吐推算全局性能
+
+已用一份本地 VeOmni SFT 原始失败日志核对配置提取和无性能数据流程；该日志的进度条到过 1/306 后报错，但未打印可用的逐步效率指标。正常逐步指标使用按源码字段构造的合成测试，尚无本地完整成功训练日志可作性能回归。原始日志没有提交到仓库。指标来源和版本范围见 [VeOmni 解析说明](docs/veomni-parser.md)
+
+### SFT：兼容标准化逐步 JSONL
 
 经核对原日志与框架指标定义后，每个 optimizer/global step 一行，使用以下格式：
 
@@ -111,7 +125,7 @@ step:2 - perf/throughput:120 - perf/time_per_step:160 - timing_s/update_actor:55
 {"task":"SFT","step":2,"tps":22000,"tps_unit":"tokens/s","step_time_s":8.5,"mfu":0.34}
 ```
 
-`tps_unit` 必填，允许 `tokens/s` 或 `tokens/s/device`，同一文件必须一致。JSONL 中的 MFU 为 0–1 小数比例，页面展示为百分比；指标缺失用 `null` 或省略，不能用 0 代替未知值。不把进度条速率、micro-step、滑动均值直接当作单步性能。支持真实 SFT 日志是下一步适配工作
+`tps_unit` 必填，允许 `tokens/s` 或 `tokens/s/device`，同一文件必须一致。JSONL 中的 MFU 为 0–1 小数比例，页面展示为百分比；指标缺失用 `null` 或省略，不能用 0 代替未知值。不把进度条速率、micro-step、滑动均值直接当作单步性能。其他 SFT 框架的原始日志仍需单独适配
 
 ## 数据与边界
 
@@ -134,6 +148,7 @@ python3 -B -m unittest discover -s test -p test_collect_environment.py
 ```text
 public/parser.js    逐步解析、范围选择与覆盖检查
 public/config.js    安全读取配置字面量并映射字段
+public/veomni.js    VeOmni 原始 SFT 日志配置及显式指标提取
 public/columns.json RL/SFT 表头
 public/app.js       上传、核对、保存、记录页
 public/storage.js   浏览器本地持久化
