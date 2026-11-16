@@ -203,6 +203,7 @@ function renderReview(preserved = {}) {
   state.initial = metricInputValues(p.metrics);
   $('#parse-details').hidden = !p.configuration?.notes?.length;
   $('#parse-notes').textContent = (p.configuration?.notes || []).join('\n');
+  $('#config-status').classList.toggle('config-warning', Boolean(p.configuration?.warning));
   $('#config-status').textContent = p.configuration?.warning || (p.configuration && Object.keys(p.configuration.fields).length ?
     `已从运行配置提取 ${Object.keys(p.configuration.fields).length} 项；默认满血，已知模型填入官方总层数和总专家数，请按实际运行核对` : '默认满血；未识别到的模型层数和专家数需填写，减层时改为实际数/总数');
   const metricKeys = Object.keys(p.metrics);

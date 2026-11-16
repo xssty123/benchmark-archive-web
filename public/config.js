@@ -3,6 +3,7 @@ import { normalizeRecompute } from './recompute.js';
 // Read Python pprint data literals only. Never evaluate executable log content.
 export function readLiteral(text) {
   let i = 0;
+  const fail = message => { const error = new Error(message); error.position = i; throw error; };
   const ws = () => { while (/\s/.test(text[i] || '') && i < text.length) i++; };
   function string() {
     const quote = text[i++]; let out = '';
@@ -13,16 +14,18 @@ export function readLiteral(text) {
         c = text[i++];
         if (['u', 'x'].includes(c)) {
           const n = c === 'u' ? 4 : 2, hex = text.slice(i, i + n);
-          if (!new RegExp(`^[0-9a-f]{${n}}$`, 'i').test(hex)) throw Error('Invalid escape');
+          if (!new RegExp(`^[0-9a-f]{${n}}$`, 'i').test(hex)) fail('Invalid escape');
           out += String.fromCharCode(parseInt(hex, 16)); i += n;
         } else out += ({ n: '\n', r: '\r', t: '\t', '\\': '\\', "'": "'", '"': '"' })[c] ?? ('\\' + c);
       } else out += c;
     }
-    throw Error('Unclosed string');
+    fail('Unclosed string');
   }
   function value(depth = 0) {
-    if (depth > 100) throw Error('Config too deep');
-    ws(); const c = text[i];
+    if (depth > 100) fail('Config too deep');
+    ws();
+    if (i >= text.length) fail('Incomplete literal');
+    const c = text[i];
     if (c === "'" || c === '"') {
       let out = string(); ws();
       while (text[i] === "'" || text[i] === '"') { out += string(); ws(); }
@@ -35,17 +38,18 @@ export function readLiteral(text) {
       while (text[i] !== close) {
         const item = value(depth + 1); ws();
         if (dict) {
-          if (typeof item !== 'string' || text[i++] !== ':') throw Error('Invalid dict');
+          if (typeof item !== 'string' || text[i++] !== ':') fail('Invalid dict');
           const next = value(depth + 1);
-          if (Object.hasOwn(out, item)) throw Error('Duplicate config key');
+          if (Object.hasOwn(out, item)) fail('Duplicate config key');
           out[item] = next;
         } else out.push(item);
-        ws(); if (text[i] === ',') { i++; ws(); } else if (text[i] !== close) throw Error('Invalid separator');
+        ws(); if (i >= text.length) fail('Incomplete literal');
+        if (text[i] === ',') { i++; ws(); } else if (text[i] !== close) fail('Invalid separator');
       }
       i++; return out;
     }
     const token = text.slice(i).match(/^(?:True|False|None|true|false|null|[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[-+]?\d+)?)/i)?.[0];
-    if (!token) throw Error('Unsupported literal');
+    if (!token) fail('Unsupported literal');
     i += token.length;
     const literals = { True: true, False: false, None: null, true: true, false: false, null: null };
     return Object.hasOwn(literals, token) ? literals[token] : Number(token);
@@ -54,22 +58,98 @@ export function readLiteral(text) {
   return { value: result, end: i };
 }
 
+// Strip only recognized logger prefixes at the start of each physical line.
+export function cleanConfigLog(text) {
+  return text.replace(/(?:\x1b|\\x1b|\\u001b)\[[0-?]*[ -/]*[@-~]/gi, '').split(/\r\n|\n|\r/).map(line => {
+    line = line.replace(/^\uFEFF/, '');
+    const prefixes = [
+      /^[ \t]*\[(?:\d{1,3};)*\d{1,3}m/, // A pasted ANSI prefix may lose its ESC byte.
+      /^[ \t]*\([^\n)]*\bpid=\d+[^)]*\)[ \t]?/,
+      /^[ \t]*\[rank[ \t]*\d+\][ \t]*:?[ \t]*/i,
+      /^[ \t]*(?:\[\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?\]|\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?)[ \t]*(?:[-|][ \t]*)?/,
+      /^[ \t]*(?:\[(?:DEBUG|INFO|WARNING|WARN|ERROR|CRITICAL)\]|(?:DEBUG|INFO|WARNING|WARN|ERROR|CRITICAL)\b)[ \t]*(?:[-:|][ \t]*)?/,
+    ];
+    for (;;) {
+      const prefix = prefixes.find(pattern => pattern.test(line));
+      if (!prefix) return line;
+      line = line.replace(prefix, '');
+    }
+  }).join('\n');
+}
+
+// Balanced outer dictionaries, respecting strings, in a single pass over the log.
+function* dictionaryBlocks(text) {
+  let start = -1, depth = 0, quote = '', escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (start < 0) {
+      if (c === '{') {
+        let next = i + 1;
+        while (/\s/.test(text[next] || '') && next < text.length) next++;
+        if (text[next] === '"' || text[next] === "'" || text.slice(i + 1, next).includes('\n')) { start = i; depth = 1; }
+      }
+      continue;
+    }
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (c === '\\') escaped = true;
+      else if (c === quote) quote = '';
+    } else if (c === '"' || c === "'") quote = c;
+    else if (c === '{') depth++;
+    else if (c === '}' && --depth === 0) {
+      yield { start, text: text.slice(start, i + 1), complete: true };
+      start = -1;
+    }
+  }
+  if (start >= 0) yield { start, text: text.slice(start), complete: false };
+}
+
+function sameConfig(a, b) {
+  if (a === b) return true;
+  if (!a || !b || typeof a !== 'object' || typeof b !== 'object' || Array.isArray(a) !== Array.isArray(b)) return false;
+  const keys = Object.keys(a);
+  return keys.length === Object.keys(b).length && keys.every(key => Object.hasOwn(b, key) && sameConfig(a[key], b[key]));
+}
+
 export function extractConfig(text) {
-  const clean = text.replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '').split(/\r?\n/)
-    .map(line => line.replace(/^\([^\n)]*pid=\d+[^)]*\)\s?/, '')).join('\n');
-  const candidates = [...clean.matchAll(/\{\s*['"]actor_rollout_ref['"]\s*:/g)];
-  const configs = [];
-  for (const match of candidates) {
+  const clean = cleanConfigLog(text), configs = [], problems = [];
+  const lineAt = position => clean.slice(0, position).split('\n').length;
+  const empty = warning => ({ fields: {}, evidence: {}, notes: [], warning });
+  for (const block of dictionaryBlocks(clean)) {
+    if (!/['"]actor_rollout_ref['"]\s*:/.test(block.text)) continue;
+    const where = `第 ${lineAt(block.start)} 行开始的配置`;
+    if (!block.complete) {
+      problems.push(`${where}未闭合：可能被截断、日志行交错或含未识别的前缀，请核对该配置块`);
+      continue;
+    }
     try {
-      const c = readLiteral(clean.slice(match.index)).value;
-      if (c?.actor_rollout_ref && c?.trainer) configs.push(c);
-    } catch { /* Unsupported/incomplete dumps remain visibly unparsed. */ }
+      const c = readLiteral(block.text).value;
+      if (!c || !Object.hasOwn(c, 'actor_rollout_ref')) {
+        problems.push(`${where}的 actor_rollout_ref 不在配置顶层，暂不支持该包装格式`);
+      } else if (!c.actor_rollout_ref || typeof c.actor_rollout_ref !== 'object' || Array.isArray(c.actor_rollout_ref) ||
+                 !c.trainer || typeof c.trainer !== 'object' || Array.isArray(c.trainer)) {
+        problems.push(`${where}缺少有效的 actor_rollout_ref 或 trainer 配置对象`);
+      } else configs.push({ config: c, line: lineAt(block.start) });
+    } catch (error) {
+      const line = lineAt(block.start + (error.position || 0));
+      const reasons = { 'Unsupported literal': '包含暂不支持的数据类型或日志前缀', 'Duplicate config key': '包含重复字段',
+        'Invalid separator': '分隔符格式不支持，可能夹杂日志前缀或其他输出', 'Invalid dict': '字典键值格式不支持',
+        'Invalid escape': '字符串转义格式不支持', 'Config too deep': '嵌套层级超过支持范围',
+        'Incomplete literal': '配置内容不完整', 'Unclosed string': '字符串未闭合' };
+      problems.push(`${where}解析失败（第 ${line} 行）：${reasons[error.message] || '格式暂不支持'}`);
+    }
   }
-  if (!configs.length) return { fields: {}, evidence: {}, notes: [], warning: candidates.length ? '运行配置块不完整或格式暂不支持，请手动核对配置' : '' };
-  if (configs.some(c => JSON.stringify(c) !== JSON.stringify(configs[0]))) {
-    return { fields: {}, evidence: {}, notes: [], warning: '发现多份不同运行配置，配置字段未自动填入，请先拆分日志' };
+  if (problems.length) return empty(problems.slice(0, 3).join('；') + '。配置字段未自动填入，请核对或手动填写');
+  if (!configs.length) {
+    if (/\bactor_rollout_ref(?:['"]?\s*:|\.)/.test(clean)) return empty('发现 actor_rollout_ref 配置线索，但未找到完整的字典配置块；YAML、启动参数或被截取的配置片段暂不支持，请提供完整配置打印或手动填写');
+    return empty('未找到运行配置：日志中没有识别到包含 actor_rollout_ref 和 trainer 的配置块，请确认日志包含启动时的完整配置打印，或手动填写');
   }
-  return mapConfig(configs[0], clean);
+  if (configs.some(c => !sameConfig(c.config, configs[0].config))) {
+    return empty(`发现多份不同运行配置（起始行 ${configs.map(c => c.line).join('、')}），配置字段未自动填入，请先拆分日志`);
+  }
+  const result = mapConfig(configs[0].config, clean);
+  if (!result.fields['模型']) result.notes.push('已解析配置，但 actor_rollout_ref.model.path 缺失或不是有效字符串，模型名称需手动填写');
+  return result;
 }
 
 export function mapConfig(c, text = '') {
@@ -110,7 +190,9 @@ export function mapConfig(c, text = '') {
   if (a.use_dynamic_bsz === true) notes.push('动态 batch，MBS 为配置值，未设置固定 GAS 时不推算');
   if (gbs) notes.push(`GBS 按 verl 配置 ${a.ppo_mini_batch_size} × ${r.n} = ${gbs} 推算`);
   const strategy = a.strategy;
-  if (strategy === 'fsdp2' || strategy === 'fsdp') {
+  if (strategy === 'veomni') {
+    set('训练后端', 'VeOmni', 'actor_rollout_ref.actor.strategy');
+  } else if (strategy === 'fsdp2' || strategy === 'fsdp') {
     set('训练后端', `PyTorch ${strategy.toUpperCase()}`, 'actor.strategy');
     const sp = a.ulysses_sequence_parallel_size;
     set('训练并行策略', `${strategy.toUpperCase()}${devices ? ` (${devices}P)` : ''}${positive(sp) ? `, Ulysses SP${sp}` : ''}`, 'actor.strategy / ulysses_sequence_parallel_size；trainer 设备数');
