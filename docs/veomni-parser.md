@@ -9,11 +9,11 @@
 | 模型、系列、参数 | `model.model_path` 及模型名称；路径以 transformer 等组件目录结尾时，取可确认的模型目录名 |
 | 序列 | 文本/VLM 取 `data.max_seq_len`；DiT 不把该文本配置当成实际 latent 序列长度，未明确记录时留空 |
 | 集群规格 | `Process rank: ..., world size: ...` |
-| 训练后端 | VeOmni 日志标识与 `model.accelerator.fsdp_config.fsdp_mode` |
-| 并行策略 | `model.accelerator` 下的 DP 分片/副本、TP、PP、CP、Ulysses、EP |
+| 训练后端 | VeOmni 日志标识与 `model.accelerator.fsdp_config.fsdp_mode` 或 `train.accelerator.fsdp_config.fsdp_mode` |
+| 并行策略 | `model.accelerator` 或 `train.accelerator` 下的 DP 分片/副本、TP、PP、CP、Ulysses、EP |
 | MBS / GBS | `train.micro_batch_size` / `train.global_batch_size` |
 | GAS | `Set gradient accumulation to N.`；不从动态 batch 推算 |
-| 重计算 | `model.accelerator.gradient_checkpointing` 的 enable、recompute_layers、selective_recompute_layers |
+| 重计算 | `model.accelerator.gradient_checkpointing`、`train.gradient_checkpointing` 或 `train.accelerator.gradient_checkpointing` 的 enable、recompute_layers、selective_recompute_layers |
 | 层数、专家数 | 文本/VLM 取 HF `Model config` 的 `text_config` 或根字段；DiT 依据 Detected DiT model type 匹配主干配置，层数取 `num_layers`；不取条件模型、token refiner 或视觉塔的层数 |
 
 未记录的场景分类、调优策略和基线比不猜测。环境、日志存档和 profiling 仍由用户填写链接。重复/无效配置值只使相关字段留空，其他字段继续识别；手工备注不写入解析提示

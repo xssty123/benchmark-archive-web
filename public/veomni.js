@@ -53,6 +53,23 @@ export function extractVeOmniConfig(text) {
     return positive(values[0]) ? values[0] : undefined;
   }
   const get = path => pick(configs, path);
+  // VeOmni releases place accelerator/checkpoint settings under different
+  // owners. Resolve aliases per leaf, never switch the entire schema based
+  // on one key or let a conflicting/broken alias hide behind a valid one.
+  function compatible(paths, sources) {
+    const found = []; let invalid = false;
+    for (const path of paths) {
+      const before = issues.length, value = get(path);
+      invalid ||= issues.length > before;
+      if (value !== undefined) found.push({ path, value });
+    }
+    if (invalid || found.some(item => JSON.stringify(item.value) !== JSON.stringify(found[0].value))) {
+      issues.push(`${paths.join(' / ')} 无法确认或存在冲突，仅相关字段留空`);
+      return undefined;
+    }
+    for (const item of found) sources.add(item.path);
+    return found[0]?.value;
+  }
   const modelPath = get('model.model_path');
   const detectedTypes = [...new Set([...clean.matchAll(/^[ \t]*Detected DiT model type:\s*(\w+)\./gm)].map(match => match[1]))];
   const dit = get('data.data_type') === 'diffusion' || detectedTypes.length > 0;
@@ -75,30 +92,35 @@ export function extractVeOmniConfig(text) {
   if (!dit && positive(seq)) set('序列', seq % 1024 === 0 ? `${seq / 1024}k` : String(seq), 'data.max_seq_len');
   const world = runtime(/^[ \t]*Process rank:\s*\d+,\s*world size:\s*(\d+)/gm, 'world size');
   if (world) set('集群规格', `${world}P`, 'Process rank / world size 运行日志');
-  const acc = 'model.accelerator.';
-  const fsdp = get(acc + 'fsdp_config.fsdp_mode');
-  set('训练后端', typeof fsdp === 'string' ? `VeOmni (${fsdp.toUpperCase()})` : 'VeOmni', 'VeOmni 日志；model.accelerator.fsdp_config.fsdp_mode');
-  const dpRep = get(acc + 'dp_replicate_size'), dpShard = get(acc + 'dp_shard_size');
+  const accSources = new Set();
+  const accGet = key => compatible(['model.accelerator.' + key, 'train.accelerator.' + key], accSources);
+  const fsdp = accGet('fsdp_config.fsdp_mode');
+  set('训练后端', typeof fsdp === 'string' ? `VeOmni (${fsdp.toUpperCase()})` : 'VeOmni', [...accSources].join(' / ') || 'VeOmni 日志，未确认具体后端');
+  const dpRep = accGet('dp_replicate_size'), dpShard = accGet('dp_shard_size');
   const dp = positive(dpRep) && positive(dpShard) ? dpRep * dpShard : undefined;
   const parallel = [];
   if (dp) parallel.push(`DP${dp}`);
   if (positive(dpRep)) parallel.push(`DP-Replica${dpRep}`);
   if (positive(dpShard)) parallel.push(`DP-Shard${dpShard}`);
   for (const [label, key] of [['TP', 'tp_size'], ['PP', 'pp_size'], ['CP', 'cp_size'], ['Ulysses SP', 'ulysses_size'], ['EP', 'ep_size']]) {
-    const value = get(acc + key);
+    const value = accGet(key);
     if (positive(value)) parallel.push(label + value);
   }
-  set('并行策略', parallel.join(' '), 'model.accelerator；DP = dp_replicate_size × dp_shard_size；保留复制与分片维度');
+  set('并行策略', parallel.join(' '), [...accSources].join(' / ') + '；DP = dp_replicate_size × dp_shard_size；保留复制与分片维度');
+  if (!parallel.length) issues.push('未找到有效的 model.accelerator 或 train.accelerator 并行配置，不能仅凭总卡数判断并行策略');
   const mbs = get('train.micro_batch_size'), gbs = get('train.global_batch_size');
   const gas = runtime(/^[ \t]*Set gradient accumulation to (\d+)\./gm, '梯度累积步数');
   set(BATCH, formatBatch([positive(mbs) ? mbs : '未记录', positive(gbs) ? gbs : '未记录', gas || '未记录']),
     'train.micro_batch_size / train.global_batch_size / Set gradient accumulation 运行日志；不从动态 batch 推算');
-  const checkpoint = acc + 'gradient_checkpointing.';
-  const enabled = get(checkpoint + 'enable'), layers = get(checkpoint + 'recompute_layers'), selective = get(checkpoint + 'selective_recompute_layers');
-  if (enabled === false || (enabled === true && layers === 0)) set('重计算', '未开重计算', checkpoint + 'enable / recompute_layers');
+  const checkpointSources = new Set();
+  const checkpointGet = key => compatible(['model.accelerator.gradient_checkpointing.', 'train.gradient_checkpointing.', 'train.accelerator.gradient_checkpointing.'].map(root => root + key), checkpointSources);
+  const enabled = checkpointGet('enable'), layers = checkpointGet('recompute_layers'), selective = checkpointGet('selective_recompute_layers');
+  const checkpointSource = [...checkpointSources].join(' / ');
+  if (enabled === false || (enabled === true && layers === 0)) set('重计算', '未开重计算', checkpointSource);
   else if (enabled === true) {
     set('重计算', positive(selective) ? '选择性重计算' : layers === -1 && selective === 0 ? '全重计算' : positive(layers) ? `部分重计算（${layers}层）` : '已开重计算（范围待核实）',
-      checkpoint + 'enable / recompute_layers / selective_recompute_layers');
+      checkpointSource);
+    if (layers === undefined || selective === undefined) notes.push('重计算配置未完整记录层范围；不采用其他版本的默认值补全，也不把开启开关直接判为全重计算');
     if (positive(selective)) notes.push(`VeOmni 重计算范围：${layers === -1 ? '全部层' : positive(layers) ? `末尾 ${layers} 层（不超过模型层数）` : '层范围未记录或无效'}；其中前 ${selective} 层使用选择性重计算，范围内其余层完整重算，数量受实际层数限制`);
     else if (positive(layers)) notes.push(`VeOmni 重计算配置为末尾 ${layers} 层；实际数量不超过模型层数，未据此推断覆盖全部层`);
   }

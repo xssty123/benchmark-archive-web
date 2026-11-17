@@ -232,3 +232,78 @@ test('inconsistent epoch totals disable only the time estimate and explain why',
   assert.equal(p.configuration.fields['模型'], 'Qwen3.5-35B-A3B');
   assert.match(p.configuration.notes.join('\n'), /不一致.*未估算/);
 });
+
+function trainLayout() {
+  const c = structuredClone(config);
+  const { gradient_checkpointing, ...accelerator } = c.model.accelerator;
+  delete c.model.accelerator;
+  c.train.accelerator = accelerator;
+  c.train.gradient_checkpointing = gradient_checkpointing;
+  return c;
+}
+
+test('train-owned VeOmni accelerator and checkpoint settings work independently of model-owned layout', () => {
+  const c = trainLayout();
+  c.train.gradient_checkpointing = { enable: true, debug: false, enable_reentrant: false };
+  const p = parseSFT(prefix + JSON.stringify(c) + runtime + metric(1, { step_time_s: 5 }));
+  assert.equal(p.configuration.fields['训练后端'], 'VeOmni (FSDP2)');
+  assert.equal(p.configuration.fields['并行策略'], 'DP2 DP-Replica1 DP-Shard2 TP1 PP1 CP1 Ulysses SP4 EP1');
+  assert.equal(p.configuration.fields['重计算'], '已开重计算（范围待核实）');
+  assert.match(p.configuration.evidence['并行策略'], /train.accelerator.dp_shard_size/);
+  assert.match(p.configuration.evidence['重计算'], /train.gradient_checkpointing.enable/);
+  assert.equal(p.configuration.fields['备注'], undefined);
+  assert.equal(p.metrics['单步耗时s'].mean, 5);
+});
+
+test('checkpoint layout is resolved independently of accelerator layout', () => {
+  for (const location of ['model-accelerator', 'train', 'train-accelerator']) {
+    const c = trainLayout();
+    const checkpoint = c.train.gradient_checkpointing;
+    delete c.train.gradient_checkpointing;
+    if (location === 'model-accelerator') c.model.accelerator = { gradient_checkpointing: checkpoint };
+    else if (location === 'train') c.train.gradient_checkpointing = checkpoint;
+    else c.train.accelerator.gradient_checkpointing = checkpoint;
+    const p = parseSFT(prefix + JSON.stringify(c));
+    assert.equal(p.configuration.fields['重计算'], '全重计算');
+    assert.match(p.configuration.fields['并行策略'], /DP2.*Ulysses SP4/);
+  }
+});
+
+test('same-valued aliases deduplicate while conflicts invalidate only dependent fields', () => {
+  const c = trainLayout();
+  c.model.accelerator = structuredClone(config.model.accelerator);
+  let p = parseSFT(prefix + JSON.stringify(c));
+  assert.equal(p.configuration.fields['重计算'], '全重计算');
+  assert.equal(p.configuration.warning, '');
+  c.train.accelerator.dp_shard_size = 4;
+  c.train.gradient_checkpointing.enable = false;
+  p = parseSFT(prefix + JSON.stringify(c));
+  assert.doesNotMatch(p.configuration.fields['并行策略'], /DP2|DP-Shard/);
+  assert.match(p.configuration.fields['并行策略'], /DP-Replica1.*Ulysses SP4/);
+  assert.equal(p.configuration.fields['重计算'], undefined);
+  assert.equal(p.configuration.fields['训练后端'], 'VeOmni (FSDP2)');
+  assert.match(p.configuration.warning, /冲突/);
+});
+
+test('a malformed alternate leaf cannot silently fall back to another layout', () => {
+  const c = trainLayout();
+  c.model.accelerator = structuredClone(config.model.accelerator);
+  c.train.accelerator.dp_shard_size = 'BROKEN';
+  c.train.gradient_checkpointing.enable = 'BROKEN';
+  const text = JSON.stringify(c).replaceAll('"BROKEN"', 'unsupported()');
+  const p = parseSFT(prefix + text);
+  assert.doesNotMatch(p.configuration.fields['并行策略'], /DP-Shard/);
+  assert.match(p.configuration.fields['并行策略'], /TP1.*Ulysses SP4/);
+  assert.equal(p.configuration.fields['重计算'], undefined);
+  assert.equal(p.configuration.fields['模型'], 'Qwen3.5-35B-A3B');
+  assert.match(p.configuration.warning, /无法确认|冲突/);
+});
+
+test('unknown parallel layout gives a specific explanation without inferring from device count', () => {
+  const c = structuredClone(config);
+  delete c.model.accelerator;
+  const p = parseSFT(prefix + JSON.stringify(c) + runtime);
+  assert.equal(p.configuration.fields['并行策略'], undefined);
+  assert.equal(p.configuration.fields['集群规格'], '8P');
+  assert.match(p.configuration.notes.join(' '), /model.accelerator 或 train.accelerator.*不能仅凭总卡数/);
+});

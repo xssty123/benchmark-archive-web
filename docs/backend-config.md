@@ -2,6 +2,8 @@
 
 配置解析与性能统计独立。缺失配置不表示关闭功能，不填默认值；不借用 ref、critic 或 rollout 的配置填写 actor。所有说明写入解析说明，备注仅保留用户输入
 
+VeOmni 原生 SFT 兼容 `model.accelerator` 与 `train.accelerator` 两种布局；重计算兼容 `model.accelerator.gradient_checkpointing`、`train.gradient_checkpointing` 和 `train.accelerator.gradient_checkpointing`。逐字段合并：相同值去重，不同值或损坏的同义字段仅阻止该字段填写；不会因为一个字段缺失就切换整套结构。只打印 enable=true 时不补其他版本的默认层范围
+
 | 框架 / 后端 | 训练并行 | 重计算 |
 | --- | --- | --- |
 | verl / FSDP、FSDP2 | 由设备总数和 `actor.fsdp_config.fsdp_size` 推导复制、分片规模；读取嵌套 SP，兼容 actor 顶层 SP>1 的覆盖 | 读取 model 的 `enable_gradient_checkpointing`；开启不自动等于全部层，已核验的 Omni Thinker 分类保留 |
