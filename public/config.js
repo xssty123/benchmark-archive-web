@@ -1,5 +1,5 @@
 import { BATCH, COMPLETENESS, LAYERS, EXPERTS, modelDefaults, formatBatch } from './record-fields.js';
-import { normalizeRecompute } from './recompute.js';
+import { normalizeRecompute, megatronRecompute } from './recompute.js';
 // Read Python pprint data literals only. Never evaluate executable log content.
 export function readLiteral(text) {
   let i = 0;
@@ -329,7 +329,7 @@ export function extractConfig(text) {
   if ((configs.length > 1 && configs.some(c => c.diagnostics.length)) || configs.some(c => !sameConfig(c.config, configs[0].config))) {
     return empty(`发现多份不同运行配置（起始行 ${configs.map(c => c.line).join('、')}），配置字段未自动填入，请先拆分日志`);
   }
-  const result = mapConfig(configs[0].config, text);
+  const result = mapConfig(configs[0].config, text, configs[0].diagnostics);
   const diagnostics = configs[0].diagnostics;
   if (diagnostics.length) {
     result.warning = diagnostics.slice(0, 3).join('；') + (diagnostics.length > 3 ? `；另有 ${diagnostics.length - 3} 项，见解析说明` : '') + '。已独立提取其余字段，请核对提示项';
@@ -341,7 +341,7 @@ export function extractConfig(text) {
   return result;
 }
 
-export function mapConfig(c, text = '') {
+export function mapConfig(c, text = '', diagnostics = []) {
   const ar = c.actor_rollout_ref || {}, a = ar.actor || {}, m = ar.model || {}, r = ar.rollout || {};
   const t = c.trainer || {}, d = c.data || {}, fields = {}, evidence = {}, notes = [];
   const set = (key, value, source) => {
@@ -383,6 +383,7 @@ export function mapConfig(c, text = '') {
   if (a.use_dynamic_bsz === true) notes.push('动态 batch，MBS 为配置值，未设置固定 GAS 时不推算');
   if (gbs) notes.push(`GBS 按 verl 配置 ${a.ppo_mini_batch_size} × ${r.n} = ${gbs} 推算`);
   const strategy = a.strategy;
+  const isMegatron = ['megatron', 'mcore', 'mindspeed'].includes(strategy) || (!strategy && c.model_engine === 'megatron');
   if (strategy === 'veomni') {
     set('训练后端', 'VeOmni', 'actor_rollout_ref.actor.strategy');
     const vm = a.veomni || {}, sp = vm.ulysses_parallel_size, ep = vm.expert_parallel_size, fsdp = vm.fsdp_size;
@@ -414,31 +415,61 @@ export function mapConfig(c, text = '') {
     const source = 'actor_rollout_ref.actor.fsdp_config.turbo_config.memory';
     if (memory.recompute === true) {
       const plan = Array.isArray(memory.recompute_plan) ? memory.recompute_plan : [];
-      const fullLayers = plan.some(path => ['model.layers.{*}', 'model.language_model.layers.{*}'].includes(path));
+      const fullLayers = plan.every(path => typeof path === 'string') && plan.some(path => ['model.layers.{*}', 'model.language_model.layers.{*}'].includes(path));
       set('重计算', fullLayers ? '全重计算' : '已开重计算（范围待核实）', source + '.recompute / recompute_plan');
       if (plan.length && plan.every(path => typeof path === 'string')) notes.push(`FSDP-Turbo 重计算模块：${plan.join('、')}`);
       if (fullLayers) notes.push('全重计算按 recompute_plan 覆盖文本主干全部 Transformer 层判定，不表示整个多模态模型所有模块均重算');
-    } else if (memory.recompute === false && m.enable_gradient_checkpointing !== true) {
-      set('重计算', '未开重计算', source + '.recompute=false；model.enable_gradient_checkpointing 未开启');
+    } else if (memory.recompute === false && m.enable_gradient_checkpointing === false) {
+      set('重计算', '未开重计算', source + '.recompute=false；model.enable_gradient_checkpointing=false');
     } else if (m.enable_gradient_checkpointing === true) {
       set('重计算', '已开重计算（范围待核实）', 'actor_rollout_ref.model.enable_gradient_checkpointing=true');
-    } else notes.push('FSDP-Turbo 的 memory.recompute 缺失或无效，重计算留空；不能仅由通用梯度检查点开关为 false 判定未开启');
+    } else notes.push('FSDP-Turbo 的 memory.recompute 缺失或无效，或通用梯度检查点开关未确认，重计算留空；关闭一个开关不代表两者都关闭');
   } else if (strategy === 'fsdp2' || strategy === 'fsdp') {
     set('训练后端', `PyTorch ${strategy.toUpperCase()}`, 'actor.strategy');
-    const sp = a.ulysses_sequence_parallel_size;
-    set('训练并行策略', `${strategy.toUpperCase()}${devices ? ` (${devices}P)` : ''}${positive(sp) ? `, Ulysses SP${sp}` : ''}`, 'actor.strategy / ulysses_sequence_parallel_size；trainer 设备数');
-  } else if (['megatron', 'mcore', 'mindspeed'].includes(strategy) || c.model_engine === 'megatron') {
-    set('训练后端', /MindSpeed|mindspeed/.test(text) ? 'Megatron Core + MindSpeed' : 'Megatron Core', 'actor.strategy / model_engine；日志 MindSpeed 标识');
+    const fc = a.fsdp_config || {}, fsdp = fc.fsdp_size, parallel = [];
+    // Legacy actor-level SP > 1 overrides the nested setting in verl.
+    const nestedSpInvalid = diagnostics.some(note => note.includes('actor_rollout_ref.actor.fsdp_config.ulysses_sequence_parallel_size：'));
+    const topSpInvalid = diagnostics.some(note => note.includes('actor_rollout_ref.actor.ulysses_sequence_parallel_size：'));
+    const sp = topSpInvalid ? undefined : positive(a.ulysses_sequence_parallel_size) && a.ulysses_sequence_parallel_size > 1
+      ? a.ulysses_sequence_parallel_size : nestedSpInvalid ? undefined
+        : Object.hasOwn(fc, 'ulysses_sequence_parallel_size') ? fc.ulysses_sequence_parallel_size : a.ulysses_sequence_parallel_size;
+    if (devices && Number.isInteger(fsdp) && fsdp !== 0) {
+      // Unlike VeOmni, this backend builds its FSDP mesh over world_size,
+      // including Ulysses ranks; do not divide the shard group by SP.
+      const shard = fsdp < 0 || fsdp >= devices ? devices : fsdp;
+      if (devices % shard === 0) {
+        if (devices / shard > 1) parallel.push(`DP-Replica${devices / shard}`);
+        parallel.push(`FSDP${shard}`);
+        notes.push(`FSDP 分片规模按 ${devices} 卡与 fsdp_size=${fsdp} 推导为 ${shard}；本后端的 FSDP 组包含 Ulysses 维度，未核验运行时进程组`);
+      } else notes.push('FSDP 设备数不能被 fsdp_size 整除，分片规模留空');
+    } else notes.push('FSDP 设备数或 fsdp_size 缺失、无效，分片规模留空，不将总设备数直接当成分片规模');
+    if (positive(sp)) parallel.push(`Ulysses SP${sp}`);
+    set('训练并行策略', parallel.join(' '), 'actor.fsdp_config.fsdp_size / ulysses_sequence_parallel_size；actor 顶层 SP>1 的兼容覆盖；trainer 设备数');
+  } else if (isMegatron) {
+    set('训练后端', strategy === 'mindspeed' ? 'Megatron Core + MindSpeed' : 'Megatron Core', 'actor.strategy / model_engine（不采用日志警告中的组件名称）');
     const mg = a.megatron || {};
-    const parallel = [['TP','tensor_model_parallel_size'],['EP','expert_model_parallel_size'],['ETP','expert_tensor_parallel_size'],['PP','pipeline_model_parallel_size'],['CP','context_parallel_size'],['VPP','virtual_pipeline_model_parallel_size']];
-    set('训练并行策略', parallel.filter(([, key]) => positive(mg[key])).map(([label, key]) => label + mg[key]).join(' '), 'actor.megatron 并行配置');
     const rec = mg.override_transformer_config || {};
-    if (rec.recompute_granularity) set('重计算', `${rec.recompute_granularity === 'full' ? '全重计算' : rec.recompute_granularity}${rec.recompute_method ? '，' + rec.recompute_method : ''}${positive(rec.recompute_num_layers) ? `，每组${rec.recompute_num_layers}层` : ''}`, 'actor.megatron.override_transformer_config（分组层数不是模型层数）');
+    const effective = { ...mg, ...rec };
+    for (const key of Object.keys(effective)) if (diagnostics.some(note => note.includes(`actor_rollout_ref.actor.megatron.override_transformer_config.${key}：`))) delete effective[key];
+    const parallel = [['TP','tensor_model_parallel_size'],['EP','expert_model_parallel_size'],['ETP','expert_tensor_parallel_size'],['PP','pipeline_model_parallel_size'],['CP','context_parallel_size'],['VPP','virtual_pipeline_model_parallel_size']];
+    const parts = parallel.flatMap(([label, key]) => {
+      if (Object.hasOwn(rec, key) && rec[key] !== mg[key]) {
+        notes.push(`Megatron ${key} 的进程组配置与模型 override_transformer_config 不一致，${label} 留空，需核对运行时配置`);
+        return [];
+      }
+      return positive(mg[key]) && Object.hasOwn(effective, key) ? [label + mg[key]] : [];
+    });
+    if (typeof effective.sequence_parallel === 'boolean') parts.push(`Sequence Parallel ${effective.sequence_parallel ? '开启' : '关闭'}`);
+    set('训练并行策略', parts.join(' '), 'actor.megatron 进程组配置；与模型覆盖冲突的维度留空；Sequence Parallel 采用模型覆盖后的开关');
+    const recompute = megatronRecompute(rec.recompute_granularity, rec.recompute_method, rec.recompute_num_layers);
+    set('重计算', recompute.value, 'actor.megatron.override_transformer_config');
+    notes.push(recompute.note);
   }
   const engineNames = { vllm: 'vLLM', vllm_omni: 'vLLM-Omni', sglang: 'SGLang' };
   if (typeof r.name === 'string') set('推理后端', (engineNames[r.name] || r.name) + (/^vllm/.test(r.name) && /vllm_ascend:register|Platform plugin ascend is activated/.test(text) ? ' + vLLM-Ascend' : ''), 'actor_rollout_ref.rollout.name；运行插件记录');
   set('推理并行策略', [['TP','tensor_model_parallel_size'],['PP','pipeline_model_parallel_size'],['DP','data_parallel_size'],['EP','expert_parallel_size']].filter(([, k]) => positive(r[k])).map(([label, k]) => label + r[k]).join(' '), 'actor_rollout_ref.rollout 并行配置');
-  if (strategy !== 'fsdp_turbo' && !fields['重计算'] && typeof m.enable_gradient_checkpointing === 'boolean') set('重计算', m.enable_gradient_checkpointing ? '开启梯度检查点' : '关闭梯度检查点', 'actor_rollout_ref.model.enable_gradient_checkpointing');
+  if (['fsdp', 'fsdp2', 'veomni'].includes(strategy) && !fields['重计算'] && typeof m.enable_gradient_checkpointing === 'boolean') set('重计算', m.enable_gradient_checkpointing ? '开启梯度检查点' : '关闭梯度检查点', 'actor_rollout_ref.model.enable_gradient_checkpointing');
+  if (!['fsdp', 'fsdp2', 'veomni', 'fsdp_turbo'].includes(strategy) && !isMegatron) notes.push(`训练后端 ${strategy || '未记录'} 的并行及重计算规则尚未适配，相关字段留空；不套用其他后端开关`);
   if (fields['重计算']) {
     const normalized = normalizeRecompute(fields['重计算'], { model, stage: m.model_stage, backend: fields['训练后端'] });
     fields['重计算'] = normalized.value;

@@ -152,7 +152,7 @@ test('resolved actor config maps model and batch without taking critic or rollou
   assert.equal(p.fields['同步/异步'], '同步'); assert.equal(p.fields['序列'], '4k→12k');
   assert.equal(p.fields['集群规格'], '8P'); assert.equal(p.fields[BATCH], 'MBS=未配置；GBS=256；GAS=动态（未推算）');
   assert.equal(p.fields['推理后端'], 'vLLM-Omni + vLLM-Ascend');
-  assert.equal(p.fields['训练并行策略'], 'FSDP2 (8P), Ulysses SP1');
+  assert.equal(p.fields['训练并行策略'], 'Ulysses SP1');
   assert.equal(p.fields['满血/减层 关键配置'], undefined);
   assert.equal(p.fields['层数/总层数（满血填总）'], undefined);
   assert.ok(p.evidence['模型']);

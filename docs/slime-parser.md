@@ -19,7 +19,7 @@
 | train_batch_size × rollout_n | `rollout_batch_size × n_samples_per_prompt`，表示生成样本数，不直接视为训练 GBS |
 | 训练并行策略、后端 | 已打印的 Megatron 并行参数与 `train_backend` |
 | 推理并行策略、后端 | SGLang 当前或旧名称的 TP/PP/DP/EP 参数，冲突时相关维度留空；每引擎设备数不直接视为 TP |
-| 重计算 | `recompute_granularity`、`recompute_method`、`recompute_num_layers`；uniform 全层分组与 block 部分层重计算区分 |
+| 重计算 | `recompute_granularity`、`recompute_method`、`recompute_num_layers`；uniform 全层分组与 block 按阶段层数重计算区分，block 不直接判定覆盖全部层 |
 
 ## 性能输入
 

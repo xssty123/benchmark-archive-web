@@ -1,5 +1,6 @@
 import { cleanConfigLog, dictionaryBlocks, readConfigFields, readLiteral } from './config.js';
 import { BATCH, LAYERS, EXPERTS, COMPLETENESS, formatBatch, modelDefaults } from './record-fields.js';
+import { megatronRecompute } from './recompute.js';
 
 export const SLIME_FIELDS = {
   '训练MFU': 'unsupported_mfu', '吞吐TPS': 'perf/actor_train_tok_per_s',
@@ -13,7 +14,7 @@ const numericKeys = new Set(('actor_num_nodes actor_num_gpus_per_node rollout_nu
   'expert_tensor_parallel_size virtual_pipeline_model_parallel_size data_parallel_size recompute_num_layers ' +
   'sglang_tp_size sglang_pp_size sglang_dp_size sglang_ep_size sglang_tensor_parallel_size sglang_pipeline_parallel_size ' +
   'sglang_data_parallel_size sglang_expert_parallel_size').split(' '));
-const boolKeys = new Set(['colocate', 'use_critic', 'use_dynamic_batch_size']);
+const boolKeys = new Set(['colocate', 'use_critic', 'use_dynamic_batch_size', 'sequence_parallel']);
 const stringKeys = new Set(['hf_checkpoint', 'train_backend', 'rollout_function_path', 'recompute_granularity', 'recompute_method']);
 const configKeys = new Set([...numericKeys, ...boolKeys, ...stringKeys]);
 const positive = value => Number.isSafeInteger(value) && value > 0;
@@ -129,7 +130,13 @@ export function extractSlimeConfig(text) {
     if (critic === false || (critic === true && positive(cn) && positive(cg))) set('集群规格', `${actor + rolloutGpus + (critic ? cn * cg : 0)}P`, '分离部署：actor + rollout + 明确启用的 critic 设备数');
   }
   const parallel = [['TP','tensor_model_parallel_size'],['PP','pipeline_model_parallel_size'],['CP','context_parallel_size'],['EP','expert_model_parallel_size'],['ETP','expert_tensor_parallel_size'],['VPP','virtual_pipeline_model_parallel_size'],['DP','data_parallel_size']];
-  set('训练并行策略', parallel.filter(([, key]) => positive(get(key))).map(([name, key]) => name + get(key)).join(' '), 'slime / Megatron 并行参数');
+  const megatron = !invalidKeys.has('train_backend') && (train == null || train === 'megatron');
+  if (megatron) {
+    const parts = parallel.filter(([, key]) => positive(get(key))).map(([name, key]) => name + get(key));
+    const sp = get('sequence_parallel');
+    if (typeof sp === 'boolean') parts.push(`Sequence Parallel ${sp ? '开启' : '关闭'}`);
+    set('训练并行策略', parts.join(' '), 'slime / Megatron 并行参数');
+  } else issues.push(`slime 训练后端 ${train} 的并行及重计算规则尚未适配，相关字段留空`);
   const aliases = [['TP','sglang_tp_size','sglang_tensor_parallel_size'],['PP','sglang_pp_size','sglang_pipeline_parallel_size'],['DP','sglang_dp_size','sglang_data_parallel_size'],['EP','sglang_ep_size','sglang_expert_parallel_size']];
   set('推理并行策略', aliases.map(([label, current, legacy]) => {
     const a = get(current), b = get(legacy);
@@ -142,9 +149,11 @@ export function extractSlimeConfig(text) {
   const prompts = get('rollout_batch_size'), n = get('n_samples_per_prompt');
   if (positive(prompts) && positive(n)) set('train_batch_size × rollout_n', `${prompts} × ${n} = ${prompts * n}`, 'slime rollout_batch_size × n_samples_per_prompt（生成样本数，不等同训练 GBS）');
   const granularity = get('recompute_granularity'), method = get('recompute_method'), layers = get('recompute_num_layers');
-  if (granularity === 'selective') set('重计算', '选择性重计算', 'recompute_granularity');
-  else if (granularity === null) set('重计算', '未开重计算', '显式 recompute_granularity=None');
-  else if (granularity === 'full') set('重计算', method === 'uniform' ? '全重计算' : method === 'block' && positive(layers) ? `部分重计算（每流水线阶段 ${layers} 层）` : '已开重计算（范围待核实）', 'recompute_granularity / recompute_method / recompute_num_layers');
+  if (megatron) {
+    const recompute = megatronRecompute(granularity, method, layers);
+    set('重计算', recompute.value, 'recompute_granularity / recompute_method / recompute_num_layers');
+    notes.push(recompute.note);
+  }
   if (!model) issues.push('未找到有效 hf_checkpoint，模型需手动核对');
   if (!entries.size) issues.push('未找到受支持的 slime 参数表、Namespace 或配置字典；配置字段留空');
   notes.push('框架：slime；配置按独立字段识别；没有明确值的配置不采用框架默认值', ...issues);

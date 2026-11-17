@@ -61,6 +61,7 @@ git diff --check
 - `config.test.mjs`：配置字段顺序、日志前缀、等价配置去重、同一行粘连及交错日志、逐字段独立提取（损坏位置前后的字段均保留）、重复字段局部失效、跨 worker 隔离、失败行号和原因；只使用合成样例
 - `slime.test.mjs`：Megatron 参数表、Namespace、逐字段容错、perf 合并、吞吐口径、编号 0、训练/rollout 不同覆盖范围的独立均值、缺失/无效值和范围选择
 - `veomni.test.mjs`：VeOmni 原生日志前缀、逐字段容错、配置及重计算映射、性能单位、缺失指标、重复步
+- `backend-config.test.mjs`：跨后端并行和重计算语义，Megatron uniform/block、FSDP 与 VeOmni 不同拓扑、覆盖优先级、未知后端和字段局部错误；规则见 `docs/backend-config.md`
 - `flow.test.mjs`：换日志清理、异步读取失效、返回核对保留修改、顶部指标卡片同步；使用最小 DOM 适配器，不代替真实浏览器测试
 - `deployment.test.mjs`：构建版本目录、完整模块依赖、旧页面刷新、加载失败提示和开发模式
 - `test_collect_environment.py`：使用临时 Git 仓库和模拟命令验证环境采集，不扫描真实训练环境

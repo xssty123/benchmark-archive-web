@@ -82,11 +82,13 @@ export function extractVeOmniConfig(text) {
   const dp = positive(dpRep) && positive(dpShard) ? dpRep * dpShard : undefined;
   const parallel = [];
   if (dp) parallel.push(`DP${dp}`);
+  if (positive(dpRep)) parallel.push(`DP-Replica${dpRep}`);
+  if (positive(dpShard)) parallel.push(`DP-Shard${dpShard}`);
   for (const [label, key] of [['TP', 'tp_size'], ['PP', 'pp_size'], ['CP', 'cp_size'], ['Ulysses SP', 'ulysses_size'], ['EP', 'ep_size']]) {
     const value = get(acc + key);
     if (positive(value)) parallel.push(label + value);
   }
-  set('并行策略', parallel.join(' '), 'model.accelerator；DP = dp_replicate_size × dp_shard_size');
+  set('并行策略', parallel.join(' '), 'model.accelerator；DP = dp_replicate_size × dp_shard_size；保留复制与分片维度');
   const mbs = get('train.micro_batch_size'), gbs = get('train.global_batch_size');
   const gas = runtime(/^[ \t]*Set gradient accumulation to (\d+)\./gm, '梯度累积步数');
   set(BATCH, formatBatch([positive(mbs) ? mbs : '未记录', positive(gbs) ? gbs : '未记录', gas || '未记录']),
@@ -97,6 +99,8 @@ export function extractVeOmniConfig(text) {
   else if (enabled === true) {
     set('重计算', positive(selective) ? '选择性重计算' : layers === -1 && selective === 0 ? '全重计算' : positive(layers) ? `部分重计算（${layers}层）` : '已开重计算（范围待核实）',
       checkpoint + 'enable / recompute_layers / selective_recompute_layers');
+    if (positive(selective)) notes.push(`VeOmni 重计算范围：${layers === -1 ? '全部层' : positive(layers) ? `末尾 ${layers} 层（不超过模型层数）` : '层范围未记录或无效'}；其中前 ${selective} 层使用选择性重计算，范围内其余层完整重算，数量受实际层数限制`);
+    else if (positive(layers)) notes.push(`VeOmni 重计算配置为末尾 ${layers} 层；实际数量不超过模型层数，未据此推断覆盖全部层`);
   }
   const known = modelDefaults(model).source;
   if (dit && !mainDumps.length) issues.push('未找到可确认的 DiT 主干 Model config，层数不从条件模型推断');
