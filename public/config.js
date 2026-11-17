@@ -362,6 +362,10 @@ export function mapConfig(c, text = '') {
   }
   set('参数', model.match(/(?:^|-)(\d+(?:\.\d+)?[BM])(?:-|$)/i)?.[1], '模型名称中的参数标识');
   set('系列', model.match(/^(Qwen|DeepSeek|Llama|Gemma|GLM|Mistral)/i)?.[1], '模型名称中的系列标识');
+  if (/^step\d+(?:[-_]|$)/i.test(model) || /^verl\.models\.transformers\.step\d+$/.test(m.external_lib || '')) {
+    set('系列', 'stepfun', '模型名称 / actor_rollout_ref.model.external_lib 的 Step 模型标识');
+    notes.push('模型名保留日志路径末级名称；不从工作目录或别名推断正式型号、参数量、层数或专家数');
+  }
   const mode = t.v1?.trainer_mode;
   if (typeof mode === 'string') set('同步/异步', /(^|_)async($|_)/.test(mode) ? '异步' : /(^|_)sync($|_)/.test(mode) ? '同步' : '', 'trainer.v1.trainer_mode（不采用 rollout.mode）');
   if (positive(d.max_prompt_length) && positive(d.max_response_length)) set('序列', `${size(d.max_prompt_length)}→${size(d.max_response_length)}`, 'data.max_prompt_length / max_response_length');
@@ -381,6 +385,28 @@ export function mapConfig(c, text = '') {
   const strategy = a.strategy;
   if (strategy === 'veomni') {
     set('训练后端', 'VeOmni', 'actor_rollout_ref.actor.strategy');
+  } else if (strategy === 'fsdp_turbo') {
+    set('训练后端', 'FSDP-Turbo', 'actor_rollout_ref.actor.strategy');
+    const turbo = a.fsdp_config?.turbo_config || {}, dist = turbo.distributed || {}, memory = turbo.memory || {};
+    const parallel = [['DP', 'data_parallel_size'], ['FSDP', 'fully_shard_parallel_size'],
+      ['TP', 'tensor_parallel_size'], ['EP', 'expert_parallel_size'],
+      ['EDP', 'expert_data_parallel_size'], ['EFSDP', 'expert_fully_shard_parallel_size'],
+      ['Ulysses SP', 'ulysses_parallel_size'], ['KCP', 'kcp_parallel_size'], ['KV AllGather', 'kv_allgather_parallel_size']];
+    set('训练并行策略', parallel.filter(([, key]) => positive(dist[key])).map(([label, key]) => label + dist[key]).join(' '),
+      'actor_rollout_ref.actor.fsdp_config.turbo_config.distributed（仅显式配置，不由设备总数推算）');
+    notes.push('FSDP-Turbo 并行策略：FSDP 为参数分片规模，DP 为数据复制规模；EP / EDP / EFSDP 分别为专家并行、专家数据复制、专家参数分片，不能将所有维度相乘作为设备总数');
+    const source = 'actor_rollout_ref.actor.fsdp_config.turbo_config.memory';
+    if (memory.recompute === true) {
+      const plan = Array.isArray(memory.recompute_plan) ? memory.recompute_plan : [];
+      const fullLayers = plan.some(path => ['model.layers.{*}', 'model.language_model.layers.{*}'].includes(path));
+      set('重计算', fullLayers ? '全重计算' : '已开重计算（范围待核实）', source + '.recompute / recompute_plan');
+      if (plan.length && plan.every(path => typeof path === 'string')) notes.push(`FSDP-Turbo 重计算模块：${plan.join('、')}`);
+      if (fullLayers) notes.push('全重计算按 recompute_plan 覆盖文本主干全部 Transformer 层判定，不表示整个多模态模型所有模块均重算');
+    } else if (memory.recompute === false && m.enable_gradient_checkpointing !== true) {
+      set('重计算', '未开重计算', source + '.recompute=false；model.enable_gradient_checkpointing 未开启');
+    } else if (m.enable_gradient_checkpointing === true) {
+      set('重计算', '已开重计算（范围待核实）', 'actor_rollout_ref.model.enable_gradient_checkpointing=true');
+    } else notes.push('FSDP-Turbo 的 memory.recompute 缺失或无效，重计算留空；不能仅由通用梯度检查点开关为 false 判定未开启');
   } else if (strategy === 'fsdp2' || strategy === 'fsdp') {
     set('训练后端', `PyTorch ${strategy.toUpperCase()}`, 'actor.strategy');
     const sp = a.ulysses_sequence_parallel_size;
@@ -395,8 +421,8 @@ export function mapConfig(c, text = '') {
   }
   const engineNames = { vllm: 'vLLM', vllm_omni: 'vLLM-Omni', sglang: 'SGLang' };
   if (typeof r.name === 'string') set('推理后端', (engineNames[r.name] || r.name) + (/^vllm/.test(r.name) && /vllm_ascend:register|Platform plugin ascend is activated/.test(text) ? ' + vLLM-Ascend' : ''), 'actor_rollout_ref.rollout.name；运行插件记录');
-  set('推理并行策略', [['TP','tensor_model_parallel_size'],['PP','pipeline_model_parallel_size']].filter(([, k]) => positive(r[k])).map(([label, k]) => label + r[k]).join(' '), 'actor_rollout_ref.rollout 并行配置');
-  if (!fields['重计算'] && typeof m.enable_gradient_checkpointing === 'boolean') set('重计算', m.enable_gradient_checkpointing ? '开启梯度检查点' : '关闭梯度检查点', 'actor_rollout_ref.model.enable_gradient_checkpointing');
+  set('推理并行策略', [['TP','tensor_model_parallel_size'],['PP','pipeline_model_parallel_size'],['DP','data_parallel_size'],['EP','expert_parallel_size']].filter(([, k]) => positive(r[k])).map(([label, k]) => label + r[k]).join(' '), 'actor_rollout_ref.rollout 并行配置');
+  if (strategy !== 'fsdp_turbo' && !fields['重计算'] && typeof m.enable_gradient_checkpointing === 'boolean') set('重计算', m.enable_gradient_checkpointing ? '开启梯度检查点' : '关闭梯度检查点', 'actor_rollout_ref.model.enable_gradient_checkpointing');
   if (fields['重计算']) {
     const normalized = normalizeRecompute(fields['重计算'], { model, stage: m.model_stage, backend: fields['训练后端'] });
     fields['重计算'] = normalized.value;

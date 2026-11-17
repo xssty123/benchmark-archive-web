@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { extractConfig, readLiteral } from '../public/config.js';
+import { extractConfig, readLiteral, mapConfig } from '../public/config.js';
 import { parseRL } from '../public/parser.js';
 
 const actor = { actor: { _target_: 'example.VeOmniActorConfig', strategy: 'veomni', ppo_micro_batch_size_per_gpu: 1,
@@ -10,6 +10,60 @@ const trainer = { nnodes: 2, n_gpus_per_node: 8 };
 const config = { trainer, data: { train_batch_size: 8, max_prompt_length: 1024, max_response_length: 8192 }, actor_rollout_ref: actor };
 const dump = JSON.stringify(config, null, 2);
 const metrics = 'step:1 - perf/throughput:100 - perf/time_per_step:10';
+
+function turboFixture(memory = { recompute: true, recompute_plan: ['model.layers.{*}', 'vision_model.transformer.resblocks.{*}'] }) {
+  return { trainer: { nnodes: 16, n_gpus_per_node: 8 }, actor_rollout_ref: {
+    model: { path: '/models/step5-fixture', external_lib: 'verl.models.transformers.step5', enable_gradient_checkpointing: false },
+    actor: { strategy: 'fsdp_turbo', fsdp_config: { strategy: 'fsdp', turbo_config: { memory, distributed: {
+      data_parallel_size: 1, fully_shard_parallel_size: 128, tensor_parallel_size: 1,
+      expert_parallel_size: 8, expert_data_parallel_size: 1, expert_fully_shard_parallel_size: 16,
+      ulysses_parallel_size: 1, kcp_parallel_size: 1, kv_allgather_parallel_size: 1,
+    } } } }, rollout: { tensor_model_parallel_size: 8, pipeline_model_parallel_size: 1, data_parallel_size: 4, expert_parallel_size: 32 },
+    ref: { strategy: 'fsdp_turbo', fsdp_config: { turbo_config: { memory: { recompute: false } } } },
+  } };
+}
+
+test('FSDP-Turbo reads actor-owned parallel and recompute settings instead of generic false or ref defaults', () => {
+  const result = extractConfig(JSON.stringify(turboFixture(), null, 2));
+  assert.equal(result.warning, '');
+  assert.equal(result.fields['训练后端'], 'FSDP-Turbo');
+  assert.equal(result.fields['训练并行策略'], 'DP1 FSDP128 TP1 EP8 EDP1 EFSDP16 Ulysses SP1 KCP1 KV AllGather1');
+  assert.equal(result.fields['推理并行策略'], 'TP8 PP1 DP4 EP32');
+  assert.equal(result.fields['重计算'], '全重计算');
+  assert.equal(result.fields['系列'], 'stepfun');
+  assert.equal(result.fields['模型'], 'step5-fixture');
+  for (const key of ['参数', '层数/总层数（满血填总）', '专家/总专家（满血填总）', '备注']) assert.equal(result.fields[key], undefined);
+  assert.match(result.evidence['重计算'], /turbo_config.memory/);
+});
+
+test('FSDP-Turbo missing and selective recompute plans never become full or disabled by inference', () => {
+  for (const memory of [{}, { recompute: 'true' }]) {
+    const result = mapConfig(turboFixture(memory));
+    assert.equal(result.fields['重计算'], undefined);
+    assert.match(result.notes.join(' '), /memory.recompute 缺失或无效/);
+  }
+  for (const plan of [undefined, [], ['model.layers.{*}.self_attn'], ['model.layers.0'], ['vision_model.transformer.resblocks.{*}']]) {
+    assert.equal(mapConfig(turboFixture({ recompute: true, recompute_plan: plan })).fields['重计算'], '已开重计算（范围待核实）');
+  }
+  assert.equal(mapConfig(turboFixture({ recompute: false })).fields['重计算'], '未开重计算');
+  const generic = turboFixture({ recompute: false });
+  generic.actor_rollout_ref.model.enable_gradient_checkpointing = true;
+  assert.equal(mapConfig(generic).fields['重计算'], '已开重计算（范围待核实）');
+});
+
+test('malformed Turbo field does not erase later parallel settings or performance', () => {
+  const dump = JSON.stringify(turboFixture(), null, 2).replace('"tensor_parallel_size": 1', '"tensor_parallel_size": unsupported()');
+  const result = parseRL(dump + '\n' + metrics);
+  assert.match(result.configuration.warning, /tensor_parallel_size/);
+  assert.match(result.configuration.fields['训练并行策略'], /EP8/);
+  assert.doesNotMatch(result.configuration.fields['训练并行策略'], /\bTP1\b/);
+  assert.equal(result.configuration.fields['重计算'], '全重计算');
+  assert.equal(result.metrics['吞吐TPS'].mean, 100);
+  const absent = turboFixture();
+  delete absent.actor_rollout_ref.actor.fsdp_config;
+  assert.equal(mapConfig(absent).fields['训练并行策略'], undefined);
+  assert.equal(mapConfig(absent).fields['重计算'], undefined);
+});
 
 test('top-level and nested key order do not affect extraction or duplicate comparison', () => {
   const reordered = { actor_rollout_ref: { rollout: actor.rollout, model: actor.model, actor: actor.actor },

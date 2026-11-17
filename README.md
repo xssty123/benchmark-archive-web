@@ -97,6 +97,8 @@ step:2 - perf/throughput:120 - perf/time_per_step:160 - timing_s/update_actor:55
 - 步号区间缺失会提示；全部已记录步不等于完整训练全部步
 - 支持 verl / verl-omni 的完整 Python pprint 或 JSON 运行配置块，自动提取模型、参数标识、系列、同步/异步、序列、设备规模、batch、后端、并行策略、重计算；每个字段显示配置来源
 - 同步/异步取训练调度配置，不使用 rollout 引擎的 async 模式；GBS 按已适配 verl PPO 的 `ppo_mini_batch_size × rollout.n` 推算并注明，不推算动态 batch 的固定 GAS
+- verl 的 `fsdp_turbo` 后端读取 actor 自己的 `fsdp_config.turbo_config`：训练并行策略保留显式 DP、FSDP、TP、EP、EDP、EFSDP 及上下文并行规模，不从设备总数或 ref/critic 配置推算；rollout 同时读取显式 DP/EP
+- FSDP-Turbo 重计算优先读取 `memory.recompute` 与 `recompute_plan`，不能用通用 `enable_gradient_checkpointing=false` 覆盖后端开启状态。计划覆盖 `model.layers.{*}` 或 `model.language_model.layers.{*}` 时归为文本主干全重计算，并在解析说明标明范围；未记录计划时仅说明已开启，后端开关缺失时不推断关闭。依据：[verl 的 FSDP-Turbo memory plan](https://github.com/verl-project/verl/blob/main/docs/advance/fsdp_turbo_backend.rst)
 - 未支持的配置格式、混合配置会提示；默认满血，已知模型的官方总数作为可编辑默认值，日志覆盖配置优先，未知层数和专家数提示待填写。不能把重计算分组层数当作模型层数
 - 重计算统一显示为「全重计算 / 选择性重计算 / 未开重计算」，仅能确认开关的其他模型显示「已开重计算（范围待核实）」，未记录则留空；分组细节放入独立的解析说明
 - Qwen3-Omni-30B-A3B-Instruct 的 Thinker + FSDP/FSDP2 + `enable_gradient_checkpointing=true` 按标准实现归为全重计算，范围是 Thinker 文本主干全部 Transformer 层（含 Attention、MoE），不表示整个多模态系统所有算子都重算。依据：[DecoderLayer 及逐层调用](https://github.com/huggingface/transformers/blob/v4.57.1/src/transformers/models/qwen3_omni_moe/modeling_qwen3_omni_moe.py#L1351-L1561)、[完整层 checkpoint 包装](https://github.com/huggingface/transformers/blob/v4.57.1/src/transformers/modeling_layers.py#L33-L85)、[递归开启 checkpoint](https://github.com/huggingface/transformers/blob/v4.57.1/src/transformers/modeling_utils.py#L3413-L3424)。此版本用于核对标准实现，不代表已确认历史运行使用该版本；精确版本或自定义补丁需环境快照核验，分类依据保留在解析说明
