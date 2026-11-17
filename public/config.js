@@ -385,6 +385,22 @@ export function mapConfig(c, text = '') {
   const strategy = a.strategy;
   if (strategy === 'veomni') {
     set('训练后端', 'VeOmni', 'actor_rollout_ref.actor.strategy');
+    const vm = a.veomni || {}, sp = vm.ulysses_parallel_size, ep = vm.expert_parallel_size, fsdp = vm.fsdp_size;
+    const parallel = [];
+    // Match verl's VeOmni engine: DP = world / Ulysses, split into
+    // replicate and shard groups. Missing settings are not backend defaults.
+    const dp = devices && positive(sp) && devices % sp === 0 ? devices / sp : null;
+    if (dp && Number.isInteger(fsdp) && fsdp !== 0) {
+      const shard = fsdp < 0 || fsdp >= dp ? dp : fsdp;
+      if (dp % shard === 0) {
+        if (dp / shard > 1) parallel.push(`DP-Replica${dp / shard}`);
+        parallel.push(`FSDP${shard}`);
+        notes.push(`VeOmni 并行规模按配置推导：${devices} 卡 / Ulysses SP${sp} = DP${dp}，复制规模 ${dp / shard}、FSDP 分片规模 ${shard}；未核验运行时进程组`);
+      } else notes.push('VeOmni 的数据并行规模不能被 fsdp_size 整除，FSDP 分片规模留空，请核对配置');
+    } else notes.push('VeOmni 的设备数、ulysses_parallel_size 或 fsdp_size 缺失、无效或不整除，FSDP 分片规模留空；其余并行字段独立识别');
+    if (positive(sp)) parallel.push(`Ulysses SP${sp}`);
+    if (positive(ep)) parallel.push(`EP${ep}`);
+    set('训练并行策略', parallel.join(' '), 'actor_rollout_ref.actor.veomni：fsdp_size / ulysses_parallel_size / expert_parallel_size；分片规模结合 trainer 设备数按 verl VeOmni 规则推导');
   } else if (strategy === 'fsdp_turbo') {
     set('训练后端', 'FSDP-Turbo', 'actor_rollout_ref.actor.strategy');
     const turbo = a.fsdp_config?.turbo_config || {}, dist = turbo.distributed || {}, memory = turbo.memory || {};

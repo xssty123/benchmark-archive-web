@@ -11,6 +11,51 @@ const config = { trainer, data: { train_batch_size: 8, max_prompt_length: 1024, 
 const dump = JSON.stringify(config, null, 2);
 const metrics = 'step:1 - perf/throughput:100 - perf/time_per_step:10';
 
+function veomniFixture(veomni = { fsdp_size: -1, ulysses_parallel_size: 1, expert_parallel_size: 1 }, nodes = 1) {
+  return { ...config, trainer: { nnodes: nodes, n_gpus_per_node: 8 }, actor_rollout_ref: {
+    ...actor, actor: { ...actor.actor, veomni },
+    ref: { veomni: { fsdp_size: 2, ulysses_parallel_size: 4, expert_parallel_size: 4 } },
+  } };
+}
+
+test('verl VeOmni exposes FSDP training parallelism separately from rollout and reference settings', () => {
+  const result = parseRL(JSON.stringify(veomniFixture()) + '\n' + metrics);
+  assert.equal(result.configuration.fields['训练并行策略'], 'FSDP8 Ulysses SP1 EP1');
+  assert.equal(result.configuration.fields['训练后端'], 'VeOmni');
+  assert.match(result.configuration.evidence['训练并行策略'], /actor.veomni/);
+  assert.match(result.configuration.notes.join(' '), /按配置推导.*DP8.*复制规模 1/);
+  assert.equal(result.configuration.fields['备注'], undefined);
+  assert.equal(result.metrics['吞吐TPS'].mean, 100);
+});
+
+test('verl VeOmni handles sequence parallel, hybrid sharding and clamped FSDP size', () => {
+  for (const [vm, nodes, expected] of [
+    [{ fsdp_size: -1, ulysses_parallel_size: 2, expert_parallel_size: 4 }, 2, 'FSDP8 Ulysses SP2 EP4'],
+    [{ fsdp_size: 4, ulysses_parallel_size: 1, expert_parallel_size: 1 }, 2, 'DP-Replica4 FSDP4 Ulysses SP1 EP1'],
+    [{ fsdp_size: 32, ulysses_parallel_size: 1, expert_parallel_size: 1 }, 1, 'FSDP8 Ulysses SP1 EP1'],
+  ]) assert.equal(mapConfig(veomniFixture(vm, nodes)).fields['训练并行策略'], expected);
+});
+
+test('missing or broken VeOmni dimensions do not infer defaults or suppress valid sibling fields', () => {
+  for (const fsdp of [undefined, null, 0, '8', 3]) {
+    const result = mapConfig(veomniFixture({ fsdp_size: fsdp, ulysses_parallel_size: 1, expert_parallel_size: 2 }));
+    assert.equal(result.fields['训练并行策略'], 'Ulysses SP1 EP2');
+    assert.match(result.notes.join(' '), /FSDP.*留空/);
+  }
+  for (const sp of [undefined, null, 0, '1', 3]) {
+    const result = mapConfig(veomniFixture({ fsdp_size: -1, ulysses_parallel_size: sp, expert_parallel_size: 2 }));
+    assert.doesNotMatch(result.fields['训练并行策略'], /FSDP/);
+    assert.match(result.fields['训练并行策略'], /EP2/);
+  }
+  const missingWorld = veomniFixture(); delete missingWorld.trainer.nnodes;
+  assert.equal(mapConfig(missingWorld).fields['训练并行策略'], 'Ulysses SP1 EP1');
+  assert.equal(mapConfig(veomniFixture({})).fields['训练并行策略'], undefined);
+  const broken = JSON.stringify(veomniFixture()).replace('"fsdp_size":-1', '"fsdp_size":unsupported()');
+  const result = extractConfig(broken);
+  assert.match(result.warning, /fsdp_size/);
+  assert.equal(result.fields['训练并行策略'], 'Ulysses SP1 EP1');
+});
+
 function turboFixture(memory = { recompute: true, recompute_plan: ['model.layers.{*}', 'vision_model.transformer.resblocks.{*}'] }) {
   return { trainer: { nnodes: 16, n_gpus_per_node: 8 }, actor_rollout_ref: {
     model: { path: '/models/step5-fixture', external_lib: 'verl.models.transformers.step5', enable_gradient_checkpointing: false },

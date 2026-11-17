@@ -97,6 +97,7 @@ step:2 - perf/throughput:120 - perf/time_per_step:160 - timing_s/update_actor:55
 - 步号区间缺失会提示；全部已记录步不等于完整训练全部步
 - 支持 verl / verl-omni 的完整 Python pprint 或 JSON 运行配置块，自动提取模型、参数标识、系列、同步/异步、序列、设备规模、batch、后端、并行策略、重计算；每个字段显示配置来源
 - 同步/异步取训练调度配置，不使用 rollout 引擎的 async 模式；GBS 按已适配 verl PPO 的 `ppo_mini_batch_size × rollout.n` 推算并注明，不推算动态 batch 的固定 GAS
+- verl 的 VeOmni 训练并行读取 actor 自己的 `veomni.fsdp_size / ulysses_parallel_size / expert_parallel_size`。根据设备总数与 Ulysses SP 推导数据并行规模，再按 verl VeOmni 规则拆分 FSDP 分片和数据复制规模，例如 `FSDP8 Ulysses SP1 EP1` 或 `DP-Replica2 FSDP4 Ulysses SP1 EP1`；解析说明标明这是配置推导。缺失字段不自动补默认值，不借用 rollout、ref 或 critic 的并行设置
 - verl 的 `fsdp_turbo` 后端读取 actor 自己的 `fsdp_config.turbo_config`：训练并行策略保留显式 DP、FSDP、TP、EP、EDP、EFSDP 及上下文并行规模，不从设备总数或 ref/critic 配置推算；rollout 同时读取显式 DP/EP
 - FSDP-Turbo 重计算优先读取 `memory.recompute` 与 `recompute_plan`，不能用通用 `enable_gradient_checkpointing=false` 覆盖后端开启状态。计划覆盖 `model.layers.{*}` 或 `model.language_model.layers.{*}` 时归为文本主干全重计算，并在解析说明标明范围；未记录计划时仅说明已开启，后端开关缺失时不推断关闭。依据：[verl 的 FSDP-Turbo memory plan](https://github.com/verl-project/verl/blob/main/docs/advance/fsdp_turbo_backend.rst)
 - 未支持的配置格式、混合配置会提示；默认满血，已知模型的官方总数作为可编辑默认值，日志覆盖配置优先，未知层数和专家数提示待填写。不能把重计算分组层数当作模型层数
