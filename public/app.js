@@ -179,7 +179,8 @@ async function editRecord(record) {
 function renderRangeStatus(p) {
   $('.range-panel').hidden = p.totalCount === 0;
   $('#coverage').textContent = p.totalCount === 0 ? '已识别日志配置，未找到可用性能数据；性能字段留空，可核对、复制和保存配置' : `日志共 ${p.totalCount} 步（${p.totalFirst}–${p.totalLast}） · 当前统计 ${p.count} 步（${p.range.start}–${p.range.end}），${p.independentMetrics ? '各指标按实际记录步数取算术平均' : '逐步算术平均'}` +
-    (p.gaps ? ` · 所选范围有 ${p.gaps} 个步号未记录` : '');
+    (p.gaps ? ` · 所选范围有 ${p.gaps} 个步号未记录` : '') +
+    (p.totalCount > 0 && !p.independentMetrics ? ' · 旧记录尚未按新口径重算，点击“应用范围”可更新指标' : '');
   for (const [id, value] of [['range-start', p.range.start], ['range-end', p.range.end]]) {
     const input = $('#' + id); input.min = p.totalFirst; input.max = p.totalLast; input.value = value ?? ''; input.disabled = p.totalCount === 0;
   }
@@ -205,8 +206,9 @@ function renderReview(preserved = {}) {
   // Recalculating a range updates metrics only; retain all user-edited configuration and URLs.
   Object.assign(initial, preserved);
   state.initial = metricInputValues(p.metrics);
-  $('#parse-details').hidden = !p.configuration?.notes?.length;
-  $('#parse-notes').textContent = (p.configuration?.notes || []).join('\n');
+  const parseNotes = [p.statisticsNote, ...(p.configuration?.notes || [])].filter(Boolean);
+  $('#parse-details').hidden = !parseNotes.length;
+  $('#parse-notes').textContent = parseNotes.join('\n');
   $('#config-status').classList.toggle('config-warning', Boolean(p.configuration?.warning));
   $('#config-status').textContent = p.configuration?.warning || (p.configuration && Object.keys(p.configuration.fields).length ?
     `已从运行配置提取 ${Object.keys(p.configuration.fields).length} 项；默认满血，已知模型填入官方总层数和总专家数，请按实际运行核对` : '默认满血；未识别到的模型层数和专家数需填写，减层时改为实际数/总数');

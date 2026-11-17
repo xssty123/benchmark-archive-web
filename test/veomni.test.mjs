@@ -96,7 +96,7 @@ test('invalid or missing metric affects only itself and all explicitly logged st
   assert.equal(p.metrics['吞吐TPS'].mean, 20000); assert.equal(p.metrics['单步耗时s'].mean, 15);
   assert.equal(p.configuration.fields['模型'], 'Qwen3.5-35B-A3B');
   const lossOnly = parseSFT(text + metric(3, { 'training/total_loss': 1 }));
-  assert.equal(lossOnly.count, 3); assert.equal(lossOnly.metrics['吞吐TPS'].mean, null);
+  assert.equal(lossOnly.count, 3); assert.equal(lossOnly.metrics['吞吐TPS'].mean, 20000);
   assert.deepEqual(lossOnly.metrics['吞吐TPS'].missing, [3]);
 });
 
@@ -210,7 +210,7 @@ test('explicit step time takes precedence across the log without mixing estimate
   assert.equal(p.estimatedStepTime, false); assert.equal(p.metrics['单步耗时s'].mean, 15);
   assert.doesNotMatch(p.configuration.notes.join('\n'), /单步耗时为估算/);
   const partial = parseSFT(log + metric(1, { step_time_s: 20 }) + metric(2, { mfu: 0.2 }) + '\n' + progress(2, '6.00s/it'));
-  assert.equal(partial.metrics['单步耗时s'].mean, null);
+  assert.equal(partial.metrics['单步耗时s'].mean, 20);
   assert.deepEqual(partial.metrics['单步耗时s'].missing, [2]);
 });
 

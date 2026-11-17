@@ -157,7 +157,7 @@ test('slime training and rollout metrics average their own recorded steps when c
   assert.deepEqual(p.metrics['吞吐TPS'].missing, [7]); assert.deepEqual(p.metrics['推理耗时'].missing, [4]);
   assert.match(p.metrics['吞吐TPS'].reason, /未记录 1 步.*实际记录的 2 步/);
   assert.equal(p.configuration.fields['备注'], undefined);
-  assert.match(p.configuration.notes.join('\n'), /各指标分别.*实际记录/);
+  assert.match(p.statisticsNote, /各指标分别.*实际记录/);
   const restored = JSON.parse(JSON.stringify(p));
   const onlyRollout = selectRange(restored, 7, 7);
   assert.equal(onlyRollout.metrics['吞吐TPS'].mean, null);
@@ -175,5 +175,5 @@ test('invalid slime values still block only that metric; missing values never be
   assert.match(p.metrics['训练耗时 actor_update'].reason, /无效 1 步/);
   assert.equal(p.metrics['推理耗时'].mean, 35);
   const verl = parseRL('step:0 - perf/throughput:100\nstep:1 - perf/time_per_step:10');
-  assert.equal(verl.metrics['吞吐TPS'].mean, null);
+  assert.equal(verl.metrics['吞吐TPS'].mean, 100);
 });

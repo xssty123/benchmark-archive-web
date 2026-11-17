@@ -9,6 +9,7 @@ export const RL_FIELDS = {
 };
 const SFT_FIELDS = { MFU: 'mfu', '吞吐TPS': 'tps', '单步耗时s': 'step_time_s' };
 const ANSI = /\x1b\[[0-?]*[ -/]*[@-~]/g;
+const STATISTICS_NOTE = '各指标分别对所选范围内实际记录的步数取算术平均，默认包含全部已记录步。个别步缺字段或为 null 时不补 0，也不清空已有均值；每项显示有效、缺失及无效步数。完全未记录、包含无效数值或日志明确声明不受支持的指标留空并提示';
 
 function addStep(rows, step, values, line) {
   if (!Number.isSafeInteger(step) || step < 0) throw new Error(`第 ${line} 行步号无效`);
@@ -23,7 +24,7 @@ function addStep(rows, step, values, line) {
   rows.set(step, previous);
 }
 
-function summarize(rows, fields, unsupportedMFU = false, { estimatedStepTime = false, independentMetrics = false } = {}) {
+function summarize(rows, fields, unsupportedMFU = false) {
   if (!rows.size) throw new Error('未找到支持的逐步训练指标，请检查任务类型与日志格式');
   const steps = [...rows.keys()].sort((a, b) => a - b);
   const metrics = {};
@@ -36,12 +37,13 @@ function summarize(rows, fields, unsupportedMFU = false, { estimatedStepTime = f
         (label === '单步耗时s' && value === 0) || (label.includes('MFU') && value > 1)) invalid.push(step);
       else values.push(value);
     }
-    const allowMissing = independentMetrics && values.length > 0 && !invalid.length && !(label.includes('MFU') && unsupportedMFU);
-    const reason = allowMissing && missing.length ? `该指标未记录 ${missing.length} 步，仅平均实际记录的 ${values.length} 步` :
-      estimatedStepTime && key === 'step_time_s' && values.length && !invalid.length ? '' :
-      label.includes('MFU') && unsupportedMFU ? '日志声明 MFU 不受支持' :
+    // One policy for every adapter and range, including saved analyses from older versions.
+    const unsupported = label.includes('MFU') && unsupportedMFU;
+    const canAverage = values.length > 0 && !invalid.length && !unsupported;
+    const reason = unsupported ? '日志声明 MFU 不受支持' :
+      canAverage && missing.length ? `该指标未记录 ${missing.length} 步，仅平均实际记录的 ${values.length} 步` :
       missing.length || invalid.length ? `缺失 ${missing.length} 步 / 无效 ${invalid.length} 步` : '';
-    metrics[label] = { key, mean: reason && !allowMissing ? null : values.reduce((a, b) => a + b / values.length, 0),
+    metrics[label] = { key, mean: canAverage ? values.reduce((a, b) => a + b / values.length, 0) : null,
       validCount: values.length, missing, invalid, reason };
   }
   return { steps, count: steps.length, first: steps[0], last: steps.at(-1),
@@ -65,7 +67,7 @@ export function parseRL(text) {
         const match = part.match(/^([\w./@-]+):\s*(.*)$/);
         if (!match || !Object.values(RL_FIELDS).includes(match[1])) continue;
         const raw = match[2].trim().replace(/^(?:np|numpy)\.(?:float\d*|u?int\d*|longdouble)\(\s*(.*?)\s*\)$/, '$1');
-        const value = /^[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[-+]?\d+)?$/i.test(raw) ? Number(raw) : NaN;
+        const value = /^(?:None|null)$/.test(raw) ? null : /^[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[-+]?\d+)?$/i.test(raw) ? Number(raw) : NaN;
         if (match[1] in values && !Object.is(values[match[1]], value)) throw new Error(`第 ${index + 1} 行指标重复且冲突`);
         values[match[1]] = value;
       }
@@ -165,8 +167,8 @@ function parseNormalizedSFT(text) {
 }
 
 function withRecords(rows, fields, unsupportedMFU, metadata) {
-  const all = summarize(rows, fields, unsupportedMFU, metadata);
-  return { ...all, ...metadata, records: [...rows], fields, unsupportedMFU,
+  const all = summarize(rows, fields, unsupportedMFU);
+  return { ...all, ...metadata, independentMetrics: true, statisticsNote: STATISTICS_NOTE, records: [...rows], fields, unsupportedMFU,
     totalCount: all.count, totalFirst: all.first, totalLast: all.last,
     range: { start: all.first, end: all.last } };
 }
@@ -178,8 +180,9 @@ export function selectRange(parsed, start = parsed.totalFirst, end = parsed.tota
   }
   const rows = new Map(parsed.records.filter(([step]) => step >= start && step <= end));
   if (!rows.size) throw new Error('所选范围没有已记录训练步');
-  const selected = summarize(rows, parsed.fields, parsed.unsupportedMFU, parsed);
-  return { ...parsed, ...selected, gaps: end - start + 1 - selected.count, range: { start, end } };
+  const selected = summarize(rows, parsed.fields, parsed.unsupportedMFU);
+  return { ...parsed, ...selected, independentMetrics: true, statisticsNote: STATISTICS_NOTE,
+    gaps: end - start + 1 - selected.count, range: { start, end } };
 }
 
 export function parseLog(task, text) {

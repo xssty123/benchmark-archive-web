@@ -14,12 +14,13 @@ test('RL keeps first/slow steps and averages rates rather than pooling tokens', 
   assert.equal(p.metrics['单步耗时s'].mean, 55);
   assert.equal(p.metrics['训练MFU'].mean, null);
 });
-test('incomplete and malformed metrics do not silently become partial averages', () => {
+test('malformed metrics remain invalid while missing fields do not clear other means', () => {
   const p = parseRL('step:1 - perf/throughput:10 - perf/time_per_step:1\nstep:2 - perf/throughput:nan\nstep:3 - perf/time_per_step:2');
   assert.equal(p.count, 3);
   assert.equal(p.metrics['吞吐TPS'].mean, null);
   assert.deepEqual(p.metrics['吞吐TPS'].invalid, [2]);
   assert.deepEqual(p.metrics['吞吐TPS'].missing, [3]);
+  assert.equal(p.metrics['单步耗时s'].mean, 1.5);
 });
 test('duplicate fragments deduplicate; conflicting restarted steps fail', () => {
   const p = parseRL('step:1 - perf/throughput:10\nstep:1 - perf/throughput:10\nstep:1 - perf/time_per_step:5');
@@ -42,7 +43,8 @@ test('SFT supports explicit normalized records only, with consistent units', () 
   const row = { task: 'SFT', step: 1, tps_unit: 'tokens/s', tps: 100, step_time_s: 5, mfu: 0.2 };
   const p = parseSFT([row, { ...row, step: 2, tps: 200, mfu: null }].map(JSON.stringify).join('\n'));
   assert.equal(p.metrics['吞吐TPS'].mean, 150);
-  assert.equal(p.metrics.MFU.mean, null);
+  assert.equal(p.metrics.MFU.mean, 0.2);
+  assert.deepEqual(p.metrics.MFU.missing, [2]);
   assert.throws(() => parseSFT('step:1 - perf/throughput:10'), /JSONL/);
   assert.throws(() => parseSFT(JSON.stringify({ ...row, task: 'RL' })), /task/);
   assert.throws(() => parseSFT([row, { ...row, step: 2, tps_unit: 'tokens/s/device' }].map(JSON.stringify).join('\n')), /单位/);
@@ -119,7 +121,8 @@ test('range validates bounds, gaps and coverage within the selected window', () 
   assert.throws(() => selectRange(p, 1.5, 5), /统计范围/);
   assert.throws(() => selectRange(p, 2, 2), /没有/);
   assert.equal(selectRange(p, 2, 5).gaps, 2);
-  assert.equal(selectRange(p, 3, 5).metrics['吞吐TPS'].mean, null);
+  assert.equal(selectRange(p, 3, 5).metrics['吞吐TPS'].mean, 30);
+  assert.deepEqual(selectRange(p, 3, 5).metrics['吞吐TPS'].missing, [3]);
   assert.equal(selectRange(p, 5, 5).metrics['吞吐TPS'].mean, 30);
 });
 test('SFT uses the same selection without changing units or unsupported metric rules', () => {
